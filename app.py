@@ -12,12 +12,17 @@ import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
+try:
+    import pypdf
+except ImportError:
+    pypdf = None
+
 # Set wide page layout & modern title
 st.set_page_config(
     page_title="Hóa Đơn MTMN - Tách & Xuất DataLoad",
     page_icon="⚡",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 # Custom CSS for polished interface
@@ -32,13 +37,14 @@ st.markdown("""
     .sub-header {
         font-size: 1.05rem;
         color: #4B5563;
-        margin-bottom: 1.5rem;
+        margin-bottom: 1.2rem;
     }
-    .metric-card {
-        background-color: #F3F4F6;
-        padding: 1rem;
+    .metric-box {
+        background-color: #F8FAFC;
+        padding: 0.9rem;
         border-radius: 8px;
-        border-left: 5px solid #2563EB;
+        border: 1px solid #E2E8F0;
+        text-align: center;
     }
     .error-card {
         background-color: #FEF2F2;
@@ -47,24 +53,27 @@ st.markdown("""
         border-left: 5px solid #DC2626;
         margin-bottom: 1rem;
     }
-    .success-badge {
-        background-color: #DEF7EC;
-        color: #03543F;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-weight: 600;
-    }
-    .warning-badge {
-        background-color: #FEF08A;
-        color: #854D0E;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-weight: 600;
+    .info-banner {
+        background-color: #EFF6FF;
+        border-left: 5px solid #3B82F6;
+        padding: 0.8rem 1rem;
+        border-radius: 6px;
+        margin-bottom: 1rem;
+        font-size: 0.95rem;
+        color: #1E40AF;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# ----------------- HELPER FUNCTIONS ----------------- #
+# ----------------- PATH & TEMPLATE SETUP ----------------- #
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_TEMPLATE_NAME = "DataLoad_MTMN_T09 (MAU).xlsx"
+DEFAULT_TEMPLATE_PATH = os.path.join(CURRENT_DIR, DEFAULT_TEMPLATE_NAME)
+if not os.path.exists(DEFAULT_TEMPLATE_PATH):
+    DEFAULT_TEMPLATE_PATH = r'd:\DATA\DATA_HOADON\DataLoad_MTMN_T09 (MAU).xlsx'
+
+# ----------------- PARSER FUNCTIONS ----------------- #
 
 def extract_period(text, nlap):
     """
@@ -88,7 +97,7 @@ def extract_period(text, nlap):
 
 def clean_tax_rate(val):
     """
-    Xử lý thuế suất từ XML.
+    Xử lý thuế suất.
     Trả về số nguyên (8, 10, 5, 0) hoặc chuỗi nếu là KCT (Không chịu thuế), KKKNT.
     """
     if val is None or str(val).strip() == '':
@@ -103,9 +112,9 @@ def clean_tax_rate(val):
         return int(m.group(1))
     return 0
 
-def parse_single_xml(content_bytes, filename=""):
+def parse_xml_invoice(content_bytes, filename=""):
     """
-    Phân tích cú pháp một file XML hóa đơn điện tử.
+    Phân tích cú pháp file hóa đơn điện tử XML.
     """
     try:
         root = ET.fromstring(content_bytes)
@@ -134,7 +143,6 @@ def parse_single_xml(content_bytes, filename=""):
     else:
         mst_val = mst_nban
         
-    # Tiền trước thuế
     tgtcthue = root.find('.//TgTCThue')
     if tgtcthue is not None and tgtcthue.text:
         tien_truoc_thue = round(float(tgtcthue.text))
@@ -142,7 +150,6 @@ def parse_single_xml(content_bytes, filename=""):
         thtien = root.find('.//ThTien')
         tien_truoc_thue = round(float(thtien.text)) if thtien is not None and thtien.text else 0
         
-    # Tiền thuế
     tgtthue = root.find('.//TgTThue')
     if tgtthue is not None and tgtthue.text:
         tien_thue = round(float(tgtthue.text))
@@ -150,19 +157,18 @@ def parse_single_xml(content_bytes, filename=""):
         tthue = root.find('.//TThue')
         tien_thue = round(float(tthue.text)) if tthue is not None and tthue.text else 0
         
-    # Thuế suất
     tsuat = root.find('.//TSuat')
     tsuat_val = clean_tax_rate(tsuat.text if tsuat is not None else '8')
     
-    # Xác định có thuế hay không có thuế
-    # Có thuế: tiền thuế > 0 và thuế suất không phải KCT / 0%
-    is_taxable = (tien_thue > 0) and (tsuat_val not in [0, '0', 'KCT', 'KKKNT'])
+    # Có thuế khi tiền thuế > 0 và mức thuế không phải 0 / KCT
+    is_taxable = (tien_thue > 0) and (tsuat_val not in [0, '0', '0%', 'KCT', 'KKKNT'])
     
     noi_dung = f'Thuế GTGT điện MTMN {period}'
     nd = f'ĐIỆN MTMN {period}'
     
     return {
         'filename': filename,
+        'format': 'XML',
         'period': period,
         'tien_thue': tien_thue,
         'noi_dung': noi_dung,
@@ -177,12 +183,165 @@ def parse_single_xml(content_bytes, filename=""):
         'is_taxable': is_taxable
     }
 
+def parse_pdf_invoice(content_bytes, filename=""):
+    """
+    Phân tích cú pháp file hóa đơn điện tử PDF (TT78 / NĐ123).
+    """
+    if pypdf is None:
+        raise ValueError("Thư viện pypdf chưa được cài đặt!")
+        
+    try:
+        reader = pypdf.PdfReader(io.BytesIO(content_bytes))
+    except Exception as e:
+        raise ValueError(f"Không thể đọc file PDF ({e})")
+        
+    full_text = ""
+    for page in reader.pages:
+        txt = page.extract_text() or ""
+        full_text += txt + "\n"
+        
+    if not full_text.strip():
+        raise ValueError("File PDF không chứa văn bản (có thể là file scan/ảnh dạng PDF).")
+        
+    lines = [line.strip() for line in full_text.split('\n') if line.strip()]
+    
+    # 1. Ký hiệu
+    full_kh = ""
+    m_full_kh = re.search(r'\b([12][A-Z]\d{2}[A-Z]{3})\b', full_text)
+    if m_full_kh:
+        full_kh = m_full_kh.group(1)
+    else:
+        m_ms = re.search(r'(?:Mẫu\s*số|Ký\s*hiệu\s*mẫu\s*số)[:\s]*([12][A-Z]?)', full_text, re.IGNORECASE)
+        khms = m_ms.group(1).strip() if m_ms else "1"
+        m_kh = re.search(r'(?:Ký\s*hiệu|Ký\s*hiệu\s*HĐ|Serial)[:\s]*([A-Z0-9]{5,8})', full_text, re.IGNORECASE)
+        kh = m_kh.group(1).strip() if m_kh else "C26MHC"
+        full_kh = khms + kh if not kh.startswith(khms) else kh
+
+    # 2. Số hóa đơn
+    sh_num = 1
+    m_sh = re.search(r'(?:Số\s*hóa\s*đơn|Số\s*HĐ|Số\s*\(No\.\)|Số/No\.|Số|No\.)[:\s]*0*(\d+)', full_text, re.IGNORECASE)
+    if m_sh:
+        sh_num = int(m_sh.group(1))
+    else:
+        m_file_sh = re.search(r'-\s*0*(\d+)(?:\.pdf)?$', filename, re.IGNORECASE)
+        if m_file_sh:
+            sh_num = int(m_file_sh.group(1))
+
+    # 3. Ngày hóa đơn
+    nlap_date = datetime.datetime.now()
+    m_date1 = re.search(r'Ngày\s*0?(\d{1,2})\s*tháng\s*0?(\d{1,2})\s*năm\s*(\d{4})', full_text, re.IGNORECASE)
+    if m_date1:
+        d, m, y = int(m_date1.group(1)), int(m_date1.group(2)), int(m_date1.group(3))
+        nlap_date = datetime.datetime(y, m, d)
+    else:
+        m_date2 = re.search(r'(?:Ngày\s*lập|Ngày\s*HĐ|Ngày)[:\s]*0?(\d{1,2})[/.-]0?(\d{1,2})[/.-](\d{4})', full_text, re.IGNORECASE)
+        if m_date2:
+            d, m, y = int(m_date2.group(1)), int(m_date2.group(2)), int(m_date2.group(3))
+            nlap_date = datetime.datetime(y, m, d)
+
+    # 4. Tên người bán
+    ten_nban = ""
+    m_ten = re.search(r'(?:Đơn\s*vị\s*bán(?:\s*hàng)?|Tên\s*người\s*bán|Người\s*bán)[:\s]*([^\n\r]+)', full_text, re.IGNORECASE)
+    if m_ten:
+        ten_nban = m_ten.group(1).strip()
+    else:
+        for line in lines[:15]:
+            if line.upper().startswith(('CÔNG TY', 'CTY', 'DOANH NGHIỆP', 'DNTN', 'CHI NHÁNH')):
+                ten_nban = line
+                break
+
+    # 5. MST người bán
+    mst_val = ""
+    m_mst_list = re.findall(r'(?:Mã\s*số\s*thuế|MST)(?:\s*\(Tax\s*code\))?[:\s]*([0-9]{10}(?:-[0-9]{3})?)', full_text, re.IGNORECASE)
+    if m_mst_list:
+        for mst_cand in m_mst_list:
+            if not mst_cand.startswith('0300951119'):
+                mst_val = mst_cand
+                break
+        if not mst_val:
+            mst_val = m_mst_list[0]
+    if mst_val.isdigit() and not mst_val.startswith('0'):
+        mst_val = int(mst_val)
+
+    # 6. Kỳ phát điện & Nội dung
+    period = extract_period(full_text, nlap_date.strftime('%Y-%m-%d'))
+    noi_dung = f'Thuế GTGT điện MTMN {period}'
+    nd = f'ĐIỆN MTMN {period}'
+
+    # 7. Tiền trước thuế, Thuế, Thuế suất
+    def parse_money(s):
+        if not s: return 0
+        cleaned = re.sub(r'[^\d]', '', str(s))
+        return int(cleaned) if cleaned else 0
+
+    tien_truoc_thue = 0
+    tien_thue = 0
+    thue_suat = 8
+    
+    m_ttt = re.search(r'(?:Cộng\s*tiền\s*hàng|Tổng\s*tiền\s*chưa\s*thuế|Tiền\s*trước\s*thuế|Tổng\s*cộng\s*tiền\s*hàng)[:\s]*([\d.,]+)', full_text, re.IGNORECASE)
+    if m_ttt:
+        tien_truoc_thue = parse_money(m_ttt.group(1))
+
+    m_ts = re.search(r'(?:Thuế\s*suất\s*GTGT|Thuế\s*suất|VAT\s*rate)[:\s]*([0-9%]+|KCT|KKKNT)', full_text, re.IGNORECASE)
+    if m_ts:
+        ts_raw = m_ts.group(1).upper()
+        if 'KCT' in ts_raw or 'KKKNT' in ts_raw:
+            thue_suat = 'KCT'
+        else:
+            m_num = re.search(r'(\d+)', ts_raw)
+            thue_suat = int(m_num.group(1)) if m_num else 8
+
+    m_tt = re.search(r'(?:Tiền\s*thuế\s*GTGT|Tiền\s*thuế|VAT\s*amount)[:\s]*([\d.,]+)', full_text, re.IGNORECASE)
+    if m_tt:
+        tien_thue = parse_money(m_tt.group(1))
+    elif isinstance(thue_suat, (int, float)) and thue_suat > 0 and tien_truoc_thue > 0:
+        tien_thue = round(tien_truoc_thue * thue_suat / 100)
+
+    is_taxable = (tien_thue > 0) and (thue_suat not in [0, '0', '0%', 'KCT', 'KKKNT'])
+
+    return {
+        'filename': filename,
+        'format': 'PDF',
+        'period': period,
+        'tien_thue': tien_thue,
+        'noi_dung': noi_dung,
+        'ky_hieu_hd': full_kh,
+        'so_hd': sh_num,
+        'ngay_hd': nlap_date,
+        'ten_kh': ten_nban,
+        'mst': mst_val,
+        'nd': nd,
+        'tien_truoc_thue': tien_truoc_thue,
+        'thue_suat': thue_suat,
+        'is_taxable': is_taxable
+    }
+
+def parse_invoice_file(filename, file_bytes):
+    """
+    Tự động xác định định dạng XML hoặc PDF và trích xuất dữ liệu.
+    """
+    fname_lower = filename.lower()
+    if fname_lower.endswith('.xml'):
+        return parse_xml_invoice(file_bytes, filename)
+    elif fname_lower.endswith('.pdf'):
+        return parse_pdf_invoice(file_bytes, filename)
+    else:
+        # Thử XML trước, nếu không được thử PDF
+        try:
+            return parse_xml_invoice(file_bytes, filename)
+        except:
+            return parse_pdf_invoice(file_bytes, filename)
+
+# ----------------- EXCEL GENERATOR ----------------- #
+
 def generate_excel_bytes(valid_items, template_bytes_or_path):
     """
-    Sinh file Excel hoàn chỉnh định dạng openpyxl:
-    - Có sheet 'DATALOAD TỔNG' và từng sheet cho từng tháng.
+    Sinh file Excel chuẩn theo mẫu:
+    - Sheet 'DATALOAD TỔNG' và từng sheet theo từng tháng.
     - Sắp xếp: Hóa đơn có thuế lên trên, hóa đơn không thuế xuống dưới.
     - Hóa đơn không thuế được TÔ VÀNG TOÀN BỘ DÒNG để nhận biết rõ ràng.
+    - Cột ngày tháng định dạng: dd/mm/yyyy
+    - Cột số tiền định dạng có dấu phân cách: #,##0
     """
     if isinstance(template_bytes_or_path, str):
         wb_template = openpyxl.load_workbook(template_bytes_or_path)
@@ -192,9 +351,8 @@ def generate_excel_bytes(valid_items, template_bytes_or_path):
     ws_tmpl = wb_template.active
     
     wb_new = openpyxl.Workbook()
-    wb_new.remove(wb_new.active) # Remove sheet mặc định
+    wb_new.remove(wb_new.active)
     
-    # Sắp xếp các kỳ tháng giảm dần: T08, T07, T06...
     periods = sorted(list(set(item['period'] for item in valid_items)), reverse=True)
     
     sheets_to_create = [('DATALOAD TỔNG', valid_items)]
@@ -202,7 +360,6 @@ def generate_excel_bytes(valid_items, template_bytes_or_path):
         items_p = [item for item in valid_items if item['period'] == p]
         sheets_to_create.append((p, items_p))
         
-    # Styles
     yellow_fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
     font_tnr = Font(name='Times New Roman', size=10)
     
@@ -226,14 +383,11 @@ def generate_excel_bytes(valid_items, template_bytes_or_path):
             if src_cell.border:
                 dest_cell.border = copy(src_cell.border)
 
-        # TÁCH VÀ SẮP XẾP:
-        # Nhóm 1: Hóa đơn CÓ THUẾ (để lên trên)
-        # Nhóm 2: Hóa đơn KHÔNG THUẾ (để xuống dưới)
+        # Sắp xếp: Có thuế lên trên, Không thuế xuống dưới
         taxable_items = [it for it in raw_items if it['is_taxable']]
         nontaxable_items = [it for it in raw_items if not it['is_taxable']]
         sorted_items = taxable_items + nontaxable_items
 
-        # Ghi các dòng dữ liệu
         for idx, item in enumerate(sorted_items, start=1):
             r = idx + 1
             is_taxable = item['is_taxable']
@@ -251,7 +405,7 @@ def generate_excel_bytes(valid_items, template_bytes_or_path):
             # Col C: TAB
             ws.cell(r, 3, value='TAB').font = font_tnr
             
-            # Col D: Thuế
+            # Col D: Thuế (định dạng số có dấu phân cách hàng nghìn)
             cD = ws.cell(r, 4, value=item['tien_thue'])
             cD.font = font_tnr
             cD.number_format = '#,##0'
@@ -287,10 +441,10 @@ def generate_excel_bytes(valid_items, template_bytes_or_path):
             # Col N: TAB
             ws.cell(r, 14, value='TAB').font = font_tnr
             
-            # Col O: Ngày HĐ
+            # Col O: Ngày HĐ (Định dạng chuẩn dd/mm/yyyy theo yêu cầu)
             cO = ws.cell(r, 15, value=item['ngay_hd'])
             cO.font = font_tnr
-            cO.number_format = 'yyyy-mm-dd'
+            cO.number_format = 'dd/mm/yyyy'
             
             # Col P: TAB
             ws.cell(r, 16, value='TAB').font = font_tnr
@@ -321,7 +475,7 @@ def generate_excel_bytes(valid_items, template_bytes_or_path):
             # Col X: TAB
             ws.cell(r, 24, value='TAB').font = font_tnr
             
-            # Col Y: Số tiền trước thuế
+            # Col Y: Số tiền trước thuế (định dạng số có dấu phân cách hàng nghìn)
             cY = ws.cell(r, 25, value=item['tien_truoc_thue'])
             cY.font = font_tnr
             cY.number_format = '#,##0'
@@ -333,15 +487,11 @@ def generate_excel_bytes(valid_items, template_bytes_or_path):
             cAA = ws.cell(r, 27, value=item['thue_suat'])
             cAA.font = font_tnr
             
-            # Col AB: TAB
+            # Col AB, AC, AD, AE: TAB, CK, tab, ENT
             ws.cell(r, 28, value='TAB').font = font_tnr
-            
-            # Col AC, AD, AE: CK, tab, ENT
             ws.cell(r, 29, value='CK').font = font_tnr
             ws.cell(r, 30, value='tab').font = font_tnr
             ws.cell(r, 31, value='ENT').font = font_tnr
-            
-            # Col AF: None
             ws.cell(r, 32, value=None)
             
             # Col AG: test MST
@@ -350,9 +500,9 @@ def generate_excel_bytes(valid_items, template_bytes_or_path):
             # Col AH: test VAT
             ws.cell(r, 34, value=f'=ROUND(D{r}-(Y{r}*(AA{r}/100)),0)').font = font_tnr
 
-            # XỬ LÝ TÔ MÀU VÀNG THEO YÊU CẦU:
-            # 1. Nếu là HÓA ĐƠN CÓ THUẾ: Tô vàng các cột D, F, K, M, O, S, U, Y, AA (chuẩn theo mẫu)
-            # 2. Nếu là HÓA ĐƠN KHÔNG THUẾ (thuế = 0): Tô vàng TOÀN BỘ CÁC CỘT (A -> AH) để nhận biết ngay!
+            # XỬ LÝ TÔ VÀNG:
+            # 1. Nếu có thuế: tô vàng các cột chỉ định D, F, K, M, O, S, U, Y, AA
+            # 2. Nếu KHÔNG CÓ THUẾ: tô vàng TOÀN BỘ CÁC CỘT (A -> AH) để anh nhận biết ngay
             if is_taxable:
                 for c_target in [cD, cF, cK, cM, cO, cS, cU, cY, cAA]:
                     c_target.fill = yellow_fill
@@ -365,112 +515,79 @@ def generate_excel_bytes(valid_items, template_bytes_or_path):
     output_buffer.seek(0)
     return output_buffer
 
-# ----------------- STREAMLIT UI ----------------- #
+# ----------------- STREAMLIT INTERFACE ----------------- #
 
-# Sidebar
-with st.sidebar:
-    st.image("https://img.icons8.com/color/96/solar-panel.png", width=70)
-    st.title("⚡ Cấu Hình & Tùy Chọn")
-    
-    st.markdown("---")
-    st.subheader("📄 Mẫu File Excel (Template)")
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    default_template_path = os.path.join(current_dir, "DataLoad_MTMN_T09 (MAU).xlsx")
-    if not os.path.exists(default_template_path):
-        default_template_path = r'd:\DATA\DATA_HOADON\DataLoad_MTMN_T09 (MAU).xlsx'
-        
-    template_option = st.radio(
-        "Nguồn mẫu Excel:",
-        ["Dùng mẫu mặc định trên hệ thống", "Tải lên mẫu Excel khác"],
-        index=0
-    )
-    
-    template_file_bytes = None
-    if template_option == "Dùng mẫu mặc định trên máy":
-        if os.path.exists(default_template_path):
-            st.caption(f"✓ Sử dụng mẫu: `{os.path.basename(default_template_path)}`")
-            with open(default_template_path, 'rb') as f:
-                template_file_bytes = f.read()
-        else:
-            st.error("Không tìm thấy file mẫu mặc định!")
-    else:
-        uploaded_template = st.file_uploader("Tải lên file mẫu Excel (.xlsx)", type=["xlsx"])
-        if uploaded_template:
-            template_file_bytes = uploaded_template.read()
-            st.success("Đã tải mẫu Excel thành công!")
-            
-    st.markdown("---")
-    st.markdown("### 📌 Ghi chú nghiệp vụ:")
-    st.info("""
-    - **HĐ có thuế**: Xếp lên trên trong từng sheet.
-    - **HĐ không thuế (0% / KCT)**: Xếp xuống dưới cùng và **TÔ VÀNG TOÀN DÒNG** để nhận biết.
-    - Tự động bóc tách **kỳ tiền điện** đưa vào từng sheet riêng theo tháng.
-    """)
+st.markdown('<div class="main-header">⚡ Xử Lý Hóa Đơn Điện Tử MTMN (.XML & .PDF)</div>', unsafe_allow_html=True)
+st.markdown('<div class="sub-header">Tự động nạp vào mẫu DataLoad chuẩn, phân tách sheet theo tháng, định dạng ngày <b>dd/mm/yyyy</b> và phân cách số tiền hàng nghìn.</div>', unsafe_allow_html=True)
 
-# Main Content
-st.markdown('<div class="main-header">⚡ Xử Lý Hóa Đơn Điện Tử MTMN - Tách & Xuất DataLoad</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Đọc hóa đơn XML, kiểm tra tính hợp lệ, phân loại hóa đơn có thuế/không thuế và xuất file Excel theo chuẩn kế toán.</div>', unsafe_allow_html=True)
+# Tự động nạp mẫu chuẩn
+template_file_bytes = None
+if os.path.exists(DEFAULT_TEMPLATE_PATH):
+    with open(DEFAULT_TEMPLATE_PATH, 'rb') as f:
+        template_file_bytes = f.read()
+    st.markdown(f"""
+    <div class="info-banner">
+        ✓ <b>Mẫu Excel chuẩn đang áp dụng:</b> <code>{os.path.basename(DEFAULT_TEMPLATE_PATH)}</code> (Đã cấu hình sẵn, bạn chỉ cần tải hóa đơn lên).
+    </div>
+    """, unsafe_allow_html=True)
+else:
+    st.warning("⚠️ Không tìm thấy file mẫu mặc định, vui lòng tải file mẫu lên ở phần tùy chọn bên dưới.")
+    uploaded_tmpl = st.file_uploader("Tải file mẫu Excel (.xlsx)", type=["xlsx"])
+    if uploaded_tmpl:
+        template_file_bytes = uploaded_tmpl.read()
 
-# Input method tabs
-tab_upload, tab_folder = st.tabs(["📤 Tải File XML Lên Trực Tiếp", "📁 Đọc Từ Thư Mục Máy Tính"])
+# Input files
+tab_upload, tab_folder = st.tabs(["📤 Tải Lên Hóa Đơn (.XML hoặc .PDF)", "📁 Quét Thư Mục Hóa Đơn"])
 
-raw_xml_data = [] # List of tuples (filename, bytes_content)
+raw_files = [] # list of (filename, bytes)
 
 with tab_upload:
     uploaded_files = st.file_uploader(
-        "Kéo thả hoặc chọn các file XML hóa đơn cần xử lý:",
-        type=["xml"],
+        "Kéo thả hoặc chọn các file hóa đơn (.xml hoặc .pdf):",
+        type=["xml", "pdf"],
         accept_multiple_files=True,
-        help="Bạn có thể chọn cùng lúc nhiều file XML hoặc nhấn Ctrl+A để chọn toàn bộ."
+        help="Hỗ trợ cả file .XML và .PDF hóa đơn điện tử. Nhấn Ctrl+A trong cửa sổ chọn file để chọn toàn bộ."
     )
     if uploaded_files:
         for uf in uploaded_files:
-            raw_xml_data.append((uf.name, uf.read()))
+            raw_files.append((uf.name, uf.read()))
 
 with tab_folder:
-    default_folder = os.path.join(current_dir, "XML Tháng 8 - Đợt 1")
+    default_folder = os.path.join(CURRENT_DIR, "XML Tháng 8 - Đợt 1")
     if not os.path.exists(default_folder):
         default_folder = r"d:\DATA\DATA_HOADON\XML Tháng 8 - Đợt 1"
-    folder_path = st.text_input(
-        "Nhập đường dẫn thư mục chứa file XML:",
-        value=default_folder
-    )
-    col_btn, _ = st.columns([1, 3])
-    with col_btn:
-        read_folder_btn = st.button("🔍 Quét Thư Mục", use_container_width=True)
         
-    if read_folder_btn:
+    folder_path = st.text_input("Đường dẫn thư mục chứa hóa đơn trên máy:", value=default_folder)
+    if st.button("🔍 Quét Thư Mục", use_container_width=False):
         if os.path.exists(folder_path) and os.path.isdir(folder_path):
-            files = [f for f in os.listdir(folder_path) if f.lower().endswith('.xml')]
+            files = [f for f in os.listdir(folder_path) if f.lower().endswith(('.xml', '.pdf'))]
             if files:
-                raw_xml_data = []
+                raw_files = []
                 for fname in files:
-                    fpath = os.path.join(folder_path, fname)
                     try:
-                        with open(fpath, 'rb') as f:
-                            raw_xml_data.append((fname, f.read()))
+                        with open(os.path.join(folder_path, fname), 'rb') as f:
+                            raw_files.append((fname, f.read()))
                     except Exception as e:
                         st.error(f"Lỗi đọc file {fname}: {e}")
-                st.session_state['folder_raw_xml'] = raw_xml_data
-                st.success(f"Đã tìm thấy **{len(raw_xml_data)}** file XML trong thư mục!")
+                st.session_state['folder_raw_files'] = raw_files
+                st.success(f"Đã tìm thấy **{len(raw_files)}** file hóa đơn trong thư mục!")
             else:
-                st.warning("Không tìm thấy file .xml nào trong thư mục được chọn!")
+                st.warning("Không tìm thấy file .xml hoặc .pdf nào trong thư mục!")
         else:
             st.error("Thư mục không tồn tại. Vui lòng kiểm tra lại đường dẫn.")
             
-    if 'folder_raw_xml' in st.session_state and not raw_xml_data:
-        raw_xml_data = st.session_state['folder_raw_xml']
+    if 'folder_raw_files' in st.session_state and not raw_files:
+        raw_files = st.session_state['folder_raw_files']
 
-st.markdown("---")
-
-# Process XML Data
-if raw_xml_data:
+# Process Files
+if raw_files:
+    st.markdown("---")
     valid_items = []
     invalid_files = []
     
-    for filename, content_bytes in raw_xml_data:
+    for filename, content_bytes in raw_files:
         try:
-            item = parse_single_xml(content_bytes, filename)
+            item = parse_invoice_file(filename, content_bytes)
             valid_items.append(item)
         except Exception as e:
             invalid_files.append({
@@ -479,122 +596,115 @@ if raw_xml_data:
                 'Chi tiết lỗi': str(e)
             })
 
-    # Summary Statistics
-    col1, col2, col3, col4, col5 = st.columns(5)
+    # Metrics
+    c1, c2, c3, c4, c5 = st.columns(5)
+    taxable_cnt = sum(1 for it in valid_items if it['is_taxable'])
+    nontax_cnt = len(valid_items) - taxable_cnt
     
-    with col1:
-        st.metric("Tổng số file XML", len(raw_xml_data))
-    with col2:
+    with c1:
+        st.metric("Tổng số file", len(raw_files))
+    with c2:
         st.metric("Hóa đơn hợp lệ", len(valid_items))
-    with col3:
-        st.metric("File bị lỗi / Hỏng", len(invalid_files), delta=-len(invalid_files) if invalid_files else 0, delta_color="inverse")
-    with col4:
-        taxable_cnt = sum(1 for it in valid_items if it['is_taxable'])
-        st.metric("HĐ Có thuế", taxable_cnt)
-    with col5:
-        nontax_cnt = len(valid_items) - taxable_cnt
-        st.metric("HĐ Không thuế", nontax_cnt)
-        
-    # Warning for invalid files
+    with c3:
+        st.metric("File bị lỗi / Cần chép lại", len(invalid_files), delta=-len(invalid_files) if invalid_files else 0, delta_color="inverse")
+    with c4:
+        st.metric("HĐ Có thuế (Xếp trên)", taxable_cnt)
+    with c5:
+        st.metric("HĐ Không thuế (Tô vàng)", nontax_cnt)
+
+    # Invalid files alert
     if invalid_files:
         st.markdown('<div class="error-card">', unsafe_allow_html=True)
-        st.error(f"⚠️ **Phát hiện {len(invalid_files)} file bị lỗi cấu trúc XML!** Các file này sẽ bị bỏ qua, vui lòng kiểm tra và chép lại:")
+        st.error(f"⚠️ **Có {len(invalid_files)} file bị lỗi hoặc hỏng nội dung!** Vui lòng kiểm tra và bổ sung lại:")
         df_invalid = pd.DataFrame(invalid_files)
         st.dataframe(df_invalid, use_container_width=True)
         st.markdown('</div>', unsafe_allow_html=True)
-    else:
-        st.success("✅ Toàn bộ các file XML đều có cấu trúc hợp lệ!")
 
-    # Tabs for View & Export
-    tab_preview, tab_months, tab_export = st.tabs(["👁️ Xem Trước Dữ Liệu", "📅 Thống Kê Theo Tháng", "📥 Xuất File Excel"])
+    # Data preview & Export
+    tab_view, tab_by_month, tab_dl = st.tabs(["👁️ Bảng Dữ Liệu Chi Tiết", "📅 Thống Kê Theo Tháng", "🚀 Xuất & Tải File Excel"])
     
-    with tab_preview:
+    with tab_view:
         if valid_items:
-            df_preview = pd.DataFrame([
+            df_table = pd.DataFrame([
                 {
                     'File': it['filename'],
+                    'Loại': it['format'],
                     'Kỳ': it['period'],
-                    'Loại HĐ': '🟢 Có thuế' if it['is_taxable'] else '🟡 Không thuế',
+                    'Phân loại thuế': '🟢 Có thuế (Xếp trên)' if it['is_taxable'] else '🟡 Không thuế (Tô vàng)',
                     'Ký hiệu': it['ky_hieu_hd'],
                     'Số HĐ': it['so_hd'],
-                    'Ngày HĐ': it['ngay_hd'].strftime('%Y-%m-%d') if isinstance(it['ngay_hd'], (datetime.datetime, datetime.date)) else str(it['ngay_hd']),
+                    'Ngày HĐ': it['ngay_hd'].strftime('%d/%m/%Y') if isinstance(it['ngay_hd'], (datetime.datetime, datetime.date)) else str(it['ngay_hd']),
                     'Tên người bán': it['ten_kh'],
                     'MST': it['mst'],
-                    'Tiền trước thuế': f"{it['tien_truoc_thue']:,}",
+                    'Tiền trước thuế': f"{it['tien_truoc_thue']:,}".replace(',', ' '),
                     'Thuế suất': f"{it['thue_suat']}%" if isinstance(it['thue_suat'], int) else it['thue_suat'],
-                    'Tiền thuế': f"{it['tien_thue']:,}",
+                    'Tiền thuế': f"{it['tien_thue']:,}".replace(',', ' '),
                 }
                 for it in valid_items
             ])
-            st.dataframe(df_preview, use_container_width=True, height=400)
+            st.dataframe(df_table, use_container_width=True, height=450)
             
-    with tab_months:
+    with tab_by_month:
         if valid_items:
-            period_stats = {}
+            p_stats = {}
             for it in valid_items:
                 p = it['period']
-                if p not in period_stats:
-                    period_stats[p] = {'Tổng HĐ': 0, 'Có thuế': 0, 'Không thuế': 0, 'Tổng tiền trước thuế': 0, 'Tổng thuế': 0}
-                period_stats[p]['Tổng HĐ'] += 1
+                if p not in p_stats:
+                    p_stats[p] = {'Tổng HĐ': 0, 'Có thuế': 0, 'Không thuế': 0, 'Tiền trước thuế': 0, 'Tiền thuế': 0}
+                p_stats[p]['Tổng HĐ'] += 1
                 if it['is_taxable']:
-                    period_stats[p]['Có thuế'] += 1
+                    p_stats[p]['Có thuế'] += 1
                 else:
-                    period_stats[p]['Không thuế'] += 1
-                period_stats[p]['Tổng tiền trước thuế'] += it['tien_truoc_thue']
-                period_stats[p]['Tổng thuế'] += it['tien_thue']
+                    p_stats[p]['Không thuế'] += 1
+                p_stats[p]['Tiền trước thuế'] += it['tien_truoc_thue']
+                p_stats[p]['Tiền thuế'] += it['tien_thue']
                 
-            df_periods = pd.DataFrame([
+            df_m = pd.DataFrame([
                 {
-                    'Kỳ tháng': p,
-                    'Số lượng HĐ': stats['Tổng HĐ'],
-                    'HĐ Có thuế': stats['Có thuế'],
-                    'HĐ Không thuế': stats['Không thuế'],
-                    'Tổng tiền trước thuế (VNĐ)': f"{stats['Tổng tiền trước thuế']:,}",
-                    'Tổng tiền thuế (VNĐ)': f"{stats['Tổng thuế']:,}"
+                    'Kỳ phát điện': p,
+                    'Số lượng HĐ': s['Tổng HĐ'],
+                    'HĐ Có thuế': s['Có thuế'],
+                    'HĐ Không thuế': s['Không thuế'],
+                    'Tổng tiền trước thuế (VNĐ)': f"{s['Tiền trước thuế']:,}".replace(',', ' '),
+                    'Tổng tiền thuế (VNĐ)': f"{s['Tiền thuế']:,}".replace(',', ' ')
                 }
-                for p, stats in sorted(period_stats.items(), reverse=True)
+                for p, s in sorted(p_stats.items(), reverse=True)
             ])
-            st.dataframe(df_periods, use_container_width=True)
+            st.dataframe(df_m, use_container_width=True)
 
-    with tab_export:
-        if valid_items:
-            st.markdown("### 🎯 Xuất Dữ Liệu Ra File Excel")
-            st.write("""
-            Khi bấm nút bên dưới, hệ thống sẽ:
-            1. Tạo sheet **`DATALOAD TỔNG`** chứa toàn bộ các hóa đơn.
-            2. Tạo các sheet riêng biệt cho từng tháng: **`T08-2026`**, **`T07-2026`**, v.v.
-            3. Trong mỗi sheet, **hóa đơn có thuế được xếp lên trên**, **hóa đơn không thuế được xếp xuống dưới và tô vàng toàn bộ dòng**.
-            4. Điền đầy đủ các cột tô vàng và các cột cố định (Mã TK, TAB, CK, ENT, công thức kiểm tra).
+    with tab_dl:
+        if valid_items and template_file_bytes:
+            st.markdown("### 🎯 Xuất Dữ Liệu Ra File Excel Chuẩn")
+            st.markdown("""
+            * **Sheet tổng:** `DATALOAD TỔNG`
+            * **Các sheet tháng:** `T08-2026`, `T07-2026`...
+            * **Quy tắc sắp xếp:** Hóa đơn có thuế lên trên $\\rightarrow$ Hóa đơn không thuế xuống dưới (tô vàng toàn dòng).
+            * **Định dạng:** Ngày `dd/mm/yyyy`, Tiền số có dấu phân cách `#,#0`.
             """)
             
-            if template_file_bytes is None:
-                st.error("⚠️ Chưa có file mẫu Excel. Vui lòng kiểm tra thanh cài đặt bên trái!")
-            else:
-                col_exp1, col_exp2 = st.columns([1, 2])
-                with col_exp1:
-                    now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    default_out_name = f"DataLoad_MTMN_{now_str}.xlsx"
-                    out_filename = st.text_input("Tên file tải về:", value=default_out_name)
-                    
-                    if st.button("🚀 Bắt Đầu Tạo File Excel", type="primary", use_container_width=True):
-                        with st.spinner("Đang xử lý dữ liệu và tạo các sheet Excel..."):
-                            try:
-                                excel_buffer = generate_excel_bytes(valid_items, template_file_bytes)
-                                st.session_state['generated_excel'] = excel_buffer
-                                st.session_state['generated_filename'] = out_filename
-                                st.success("✅ Đã tạo file Excel thành công!")
-                            except Exception as ex:
-                                st.error(f"Lỗi khi tạo file Excel: {ex}")
-                                
-                with col_exp2:
-                    if 'generated_excel' in st.session_state:
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        st.download_button(
-                            label=f"📥 TẢI XUỐNG FILE EXCEL: {st.session_state.get('generated_filename', 'DataLoad.xlsx')}",
-                            data=st.session_state['generated_excel'],
-                            file_name=st.session_state.get('generated_filename', 'DataLoad.xlsx'),
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True
-                        )
+            now_tag = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            export_name = st.text_input("Tên file Excel khi tải về:", value=f"DataLoad_MTMN_{now_tag}.xlsx")
+            
+            col_b1, col_b2 = st.columns([1, 2])
+            with col_b1:
+                if st.button("🚀 Bắt Đầu Tạo File Excel", type="primary", use_container_width=True):
+                    with st.spinner("Đang áp dụng mẫu và tạo các sheet Excel..."):
+                        try:
+                            buf = generate_excel_bytes(valid_items, template_file_bytes)
+                            st.session_state['dl_excel_buffer'] = buf
+                            st.session_state['dl_excel_name'] = export_name
+                            st.success("✅ Đã tạo file Excel thành công!")
+                        except Exception as err:
+                            st.error(f"Lỗi: {err}")
+                            
+            with col_b2:
+                if 'dl_excel_buffer' in st.session_state:
+                    st.download_button(
+                        label=f"📥 TẢI XUỐNG FILE EXCEL: {st.session_state.get('dl_excel_name', 'DataLoad.xlsx')}",
+                        data=st.session_state['dl_excel_buffer'],
+                        file_name=st.session_state.get('dl_excel_name', 'DataLoad.xlsx'),
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
 else:
-    st.info("👋 Hãy tải các file hóa đơn XML lên hoặc nhập đường dẫn thư mục để bắt đầu xử lý.")
+    st.info("👋 Hãy kéo thả hoặc chọn các file hóa đơn (.XML hoặc .PDF) để bắt đầu.")
