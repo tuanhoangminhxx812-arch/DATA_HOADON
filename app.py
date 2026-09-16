@@ -370,12 +370,10 @@ def generate_excel_bytes(valid_items, template_bytes_or_path):
         for col_letter, cd in ws_tmpl.column_dimensions.items():
             ws.column_dimensions[col_letter].width = cd.width
             
-        # Sao chép dòng 1 (Header)
+        # Sao chép dòng 1 (Header) - Bỏ toàn bộ màu tô vàng để giao diện sạch đẹp
         for col_idx in range(1, ws_tmpl.max_column + 1):
             src_cell = ws_tmpl.cell(1, col_idx)
             dest_cell = ws.cell(1, col_idx, value=src_cell.value)
-            if src_cell.fill and src_cell.fill.start_color and 'FFFF00' in str(src_cell.fill.start_color.rgb):
-                dest_cell.fill = yellow_fill
             if src_cell.font:
                 dest_cell.font = copy(src_cell.font)
             if src_cell.alignment:
@@ -500,13 +498,10 @@ def generate_excel_bytes(valid_items, template_bytes_or_path):
             # Col AH: test VAT
             ws.cell(r, 34, value=f'=ROUND(D{r}-(Y{r}*(AA{r}/100)),0)').font = font_tnr
 
-            # XỬ LÝ TÔ VÀNG:
-            # 1. Nếu có thuế: tô vàng các cột chỉ định D, F, K, M, O, S, U, Y, AA
-            # 2. Nếu KHÔNG CÓ THUẾ: tô vàng TOÀN BỘ CÁC CỘT (A -> AH) để anh nhận biết ngay
-            if is_taxable:
-                for c_target in [cD, cF, cK, cM, cO, cS, cU, cY, cAA]:
-                    c_target.fill = yellow_fill
-            else:
+            # XỬ LÝ MÀU THEO YÊU CẦU:
+            # 1. Hóa đơn CÓ THUẾ: Bỏ toàn bộ màu vàng ở tất cả các cột để dữ liệu sạch đẹp tự nhiên.
+            # 2. Hóa đơn KHÔNG THUẾ: Tô vàng toàn bộ dòng (A -> AH) để anh dễ dàng nhận biết các hóa đơn không thuế.
+            if not is_taxable:
                 for col_i in range(1, 35):
                     ws.cell(r, col_i).fill = yellow_fill
                     
