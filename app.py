@@ -374,10 +374,14 @@ with st.sidebar:
     
     st.markdown("---")
     st.subheader("📄 Mẫu File Excel (Template)")
-    default_template_path = r'd:\DATA\DATA_HOADON\DataLoad_MTMN_T09 (MAU).xlsx'
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    default_template_path = os.path.join(current_dir, "DataLoad_MTMN_T09 (MAU).xlsx")
+    if not os.path.exists(default_template_path):
+        default_template_path = r'd:\DATA\DATA_HOADON\DataLoad_MTMN_T09 (MAU).xlsx'
+        
     template_option = st.radio(
         "Nguồn mẫu Excel:",
-        ["Dùng mẫu mặc định trên máy", "Tải lên mẫu Excel khác"],
+        ["Dùng mẫu mặc định trên hệ thống", "Tải lên mẫu Excel khác"],
         index=0
     )
     
@@ -424,9 +428,12 @@ with tab_upload:
             raw_xml_data.append((uf.name, uf.read()))
 
 with tab_folder:
+    default_folder = os.path.join(current_dir, "XML Tháng 8 - Đợt 1")
+    if not os.path.exists(default_folder):
+        default_folder = r"d:\DATA\DATA_HOADON\XML Tháng 8 - Đợt 1"
     folder_path = st.text_input(
-        "Nhập đường dẫn thư mục chứa file XML trên máy tính:",
-        value=r"d:\DATA\DATA_HOADON\XML Tháng 8 - Đợt 1"
+        "Nhập đường dẫn thư mục chứa file XML:",
+        value=default_folder
     )
     col_btn, _ = st.columns([1, 3])
     with col_btn:
