@@ -544,14 +544,49 @@ def parse_invoice_file(filename, file_bytes):
 
 # ----------------- EXCEL GENERATOR ----------------- #
 
-# ----------------- EXCEL GENERATOR ----------------- #
+def parse_numeric(val):
+    """
+    Chuyển đổi chuỗi số (có dấu chấm hoặc phẩy) thành số int/float an toàn.
+    """
+    if val is None or val == '':
+        return 0
+    if isinstance(val, (int, float)):
+        return val
+    s = str(val).strip()
+    cleaned = re.sub(r'[^\d.,]', '', s)
+    if not cleaned:
+        return 0
+    if '.' in cleaned and ',' in cleaned:
+        cleaned = cleaned.replace('.', '').replace(',', '.')
+        try:
+            return float(cleaned)
+        except:
+            return 0
+    if ',' in cleaned and '.' not in cleaned:
+        cleaned = cleaned.replace(',', '.')
+        try:
+            return float(cleaned)
+        except:
+            return 0
+    if '.' in cleaned:
+        parts = cleaned.split('.')
+        if len(parts) > 1 and all(len(p) == 3 for p in parts[1:]):
+            return int(''.join(parts))
+        try:
+            return float(cleaned)
+        except:
+            return 0
+    try:
+        return int(cleaned) if cleaned.isdigit() else float(cleaned)
+    except:
+        return 0
 
 def create_detail_invoice_sheet(wb, items):
     """
     Tạo sheet riêng biệt 'THÔNG TIN HÓA ĐƠN' chứa toàn bộ thông tin chi tiết:
     - Đơn vị bán (Chủ đầu tư) & Khách hàng (Bên mua): Tên, MST, Địa chỉ
-    - Chi tiết hàng hóa, dịch vụ, đơn vị tính, số lượng, đơn giá, thành tiền, thuế, tổng tiền
-    - Mỗi hóa đơn là 1 hàng (nhiều hàng hóa gom lại bằng xuống dòng trong ô).
+    - Tách riêng mỗi mặt hàng / vật tư là 1 dòng độc lập trong Excel.
+    - Thông tin hóa đơn (Số HĐ, Ký hiệu, Ngày HĐ, Bên bán, Bên mua) được giữ chung cho các dòng cùng 1 hóa đơn.
     """
     ws = wb.create_sheet(title='THÔNG TIN HÓA ĐƠN', index=0)
     
@@ -619,106 +654,153 @@ def create_detail_invoice_sheet(wb, items):
     align_left_top = Alignment(horizontal='left', vertical='top', wrap_text=True)
     align_right_top = Alignment(horizontal='right', vertical='top', wrap_text=True)
     
-    for idx, item in enumerate(items, start=1):
-        r = idx + 1
-        
-        # 1. STT
-        c1 = ws.cell(r, 1, value=idx)
-        c1.alignment = align_center_top
-        
-        # 2. Tên file
-        c2 = ws.cell(r, 2, value=item.get('filename', ''))
-        c2.alignment = align_left_top
-        
-        # 3. Ký hiệu HĐ
-        c3 = ws.cell(r, 3, value=item.get('ky_hieu_hd', ''))
-        c3.alignment = align_center_top
-        
-        # 4. Số HĐ
-        c4 = ws.cell(r, 4, value=item.get('so_hd', ''))
-        c4.alignment = align_center_top
-        
-        # 5. Ngày HĐ
-        c5 = ws.cell(r, 5, value=item.get('ngay_hd', ''))
-        c5.alignment = align_center_top
-        c5.number_format = 'dd/mm/yyyy'
-        
-        # 6. Tên Đơn vị bán (Chủ đầu tư)
-        c6 = ws.cell(r, 6, value=item.get('seller_name', ''))
-        c6.alignment = align_left_top
-        
-        # 7. MST ĐV bán
-        c7 = ws.cell(r, 7, value=str(item.get('seller_mst', '')))
-        c7.alignment = align_center_top
-        
-        # 8. Địa chỉ ĐV bán
-        c8 = ws.cell(r, 8, value=item.get('seller_addr', ''))
-        c8.alignment = align_left_top
-        
-        # 9. Tên Khách hàng (Bên mua)
-        c9 = ws.cell(r, 9, value=item.get('buyer_name', ''))
-        c9.alignment = align_left_top
-        
-        # 10. MST Khách hàng
-        c10 = ws.cell(r, 10, value=str(item.get('buyer_mst', '')))
-        c10.alignment = align_center_top
-        
-        # 11. Địa chỉ Khách hàng
-        c11 = ws.cell(r, 11, value=item.get('buyer_addr', ''))
-        c11.alignment = align_left_top
-        
-        # 12. Tên hàng hóa dịch vụ
-        c12 = ws.cell(r, 12, value=item.get('item_name_str', ''))
-        c12.alignment = align_left_top
-        
-        # 13. Đơn vị tính
-        c13 = ws.cell(r, 13, value=item.get('item_unit_str', ''))
-        c13.alignment = align_center_top
-        
-        # 14. Số lượng
-        c14 = ws.cell(r, 14, value=item.get('item_qty_str', ''))
-        c14.alignment = align_right_top
-        
-        # 15. Đơn giá
-        c15 = ws.cell(r, 15, value=item.get('item_price_str', ''))
-        c15.alignment = align_right_top
-        
-        # 16. Thành tiền (chưa thuế)
-        c16 = ws.cell(r, 16, value=item.get('tien_truoc_thue', 0))
-        c16.alignment = align_right_top
-        c16.number_format = '#,##0'
-        
-        # 17. Thuế suất
-        ts = item.get('thue_suat', '')
-        ts_display = f"{ts}%" if isinstance(ts, int) else str(ts)
-        c17 = ws.cell(r, 17, value=ts_display)
-        c17.alignment = align_center_top
-        
-        # 18. Tiền thuế GTGT
-        c18 = ws.cell(r, 18, value=item.get('tien_thue', 0))
-        c18.alignment = align_right_top
-        c18.number_format = '#,##0'
-        
-        # 19. Tổng tiền thanh toán
-        c19 = ws.cell(r, 19, value=item.get('tong_tien_tt', 0))
-        c19.alignment = align_right_top
-        c19.number_format = '#,##0'
-        
-        # 20. Số tiền bằng chữ
-        c20 = ws.cell(r, 20, value=item.get('tien_bang_chu', ''))
-        c20.alignment = align_left_top
-        
-        # 21. Ghi chú
-        c21 = ws.cell(r, 21, value=item.get('ghi_chu', ''))
-        c21.alignment = align_left_top
-        
-        for c_idx in range(1, len(headers) + 1):
-            cell = ws.cell(r, c_idx)
-            cell.font = font_body
-            cell.border = thin_border
+    current_row = 1
+    stt_counter = 0
+
+    for item in items:
+        item_rows = item.get('items', [])
+        # Nếu không có danh sách items con (ví dụ hóa đơn XML chỉ có 1 dòng chung)
+        if not item_rows:
+            item_rows = [{
+                'stt': '1',
+                'name': item.get('item_name_str', '') or item.get('noi_dung', ''),
+                'unit': item.get('item_unit_str', ''),
+                'quantity': item.get('item_qty_str', ''),
+                'price': item.get('item_price_str', ''),
+                'amount': item.get('tien_truoc_thue', 0)
+            }]
+
+        num_sub_items = len(item_rows)
+        thue_suat = item.get('thue_suat', 0)
+        ts_display = f"{thue_suat}%" if isinstance(thue_suat, int) else str(thue_suat)
+
+        for sub_idx, sub_item in enumerate(item_rows):
+            stt_counter += 1
+            current_row += 1
+            r = current_row
+
+            # Tính toán tài chính cho dòng hàng này
+            raw_amount = sub_item.get('amount', 0)
+            amount_val = parse_numeric(raw_amount)
+            if amount_val == 0 and num_sub_items == 1:
+                amount_val = item.get('tien_truoc_thue', 0)
+
+            # Tiền thuế dòng
+            if num_sub_items == 1:
+                tax_val = item.get('tien_thue', 0)
+            elif isinstance(thue_suat, (int, float)) and thue_suat > 0:
+                tax_val = round(amount_val * thue_suat / 100)
+            else:
+                tax_val = 0
+
+            # Tổng thanh toán dòng
+            total_val = amount_val + tax_val
+
+            # Số lượng và Đơn giá
+            raw_qty = sub_item.get('quantity', '')
+            raw_price = sub_item.get('price', '')
+            qty_val = parse_numeric(raw_qty) if raw_qty != '' else ''
+            price_val = parse_numeric(raw_price) if raw_price != '' else ''
+
+            # 1. STT dòng
+            c1 = ws.cell(r, 1, value=stt_counter)
+            c1.alignment = align_center_top
+            
+            # 2. Tên file
+            c2 = ws.cell(r, 2, value=item.get('filename', ''))
+            c2.alignment = align_left_top
+            
+            # 3. Ký hiệu HĐ
+            c3 = ws.cell(r, 3, value=item.get('ky_hieu_hd', ''))
+            c3.alignment = align_center_top
+            
+            # 4. Số HĐ
+            c4 = ws.cell(r, 4, value=item.get('so_hd', ''))
+            c4.alignment = align_center_top
+            
+            # 5. Ngày HĐ
+            c5 = ws.cell(r, 5, value=item.get('ngay_hd', ''))
+            c5.alignment = align_center_top
+            c5.number_format = 'dd/mm/yyyy'
+            
+            # 6. Tên Đơn vị bán (Chủ đầu tư)
+            c6 = ws.cell(r, 6, value=item.get('seller_name', ''))
+            c6.alignment = align_left_top
+            
+            # 7. MST ĐV bán
+            c7 = ws.cell(r, 7, value=str(item.get('seller_mst', '')))
+            c7.alignment = align_center_top
+            
+            # 8. Địa chỉ ĐV bán
+            c8 = ws.cell(r, 8, value=item.get('seller_addr', ''))
+            c8.alignment = align_left_top
+            
+            # 9. Tên Khách hàng (Bên mua)
+            c9 = ws.cell(r, 9, value=item.get('buyer_name', ''))
+            c9.alignment = align_left_top
+            
+            # 10. MST Khách hàng
+            c10 = ws.cell(r, 10, value=str(item.get('buyer_mst', '')))
+            c10.alignment = align_center_top
+            
+            # 11. Địa chỉ Khách hàng
+            c11 = ws.cell(r, 11, value=item.get('buyer_addr', ''))
+            c11.alignment = align_left_top
+            
+            # 12. Tên hàng hóa dịch vụ (riêng từng mặt hàng)
+            c12 = ws.cell(r, 12, value=sub_item.get('name', ''))
+            c12.alignment = align_left_top
+            
+            # 13. Đơn vị tính
+            c13 = ws.cell(r, 13, value=sub_item.get('unit', ''))
+            c13.alignment = align_center_top
+            
+            # 14. Số lượng
+            c14 = ws.cell(r, 14, value=qty_val if qty_val != '' else raw_qty)
+            c14.alignment = align_right_top
+            if isinstance(qty_val, (int, float)) and qty_val != '':
+                c14.number_format = '#,##0.##' if isinstance(qty_val, float) and not qty_val.is_integer() else '#,##0'
+
+            # 15. Đơn giá
+            c15 = ws.cell(r, 15, value=price_val if price_val != '' else raw_price)
+            c15.alignment = align_right_top
+            if isinstance(price_val, (int, float)) and price_val != '':
+                c15.number_format = '#,##0.###' if isinstance(price_val, float) and not price_val.is_integer() else '#,##0'
+            
+            # 16. Thành tiền (chưa thuế)
+            c16 = ws.cell(r, 16, value=amount_val)
+            c16.alignment = align_right_top
+            c16.number_format = '#,##0'
+            
+            # 17. Thuế suất
+            c17 = ws.cell(r, 17, value=ts_display)
+            c17.alignment = align_center_top
+            
+            # 18. Tiền thuế GTGT
+            c18 = ws.cell(r, 18, value=tax_val)
+            c18.alignment = align_right_top
+            c18.number_format = '#,##0'
+            
+            # 19. Tổng tiền thanh toán
+            c19 = ws.cell(r, 19, value=total_val)
+            c19.alignment = align_right_top
+            c19.number_format = '#,##0'
+            
+            # 20. Số tiền bằng chữ
+            c20 = ws.cell(r, 20, value=item.get('tien_bang_chu', ''))
+            c20.alignment = align_left_top
+            
+            # 21. Ghi chú
+            c21 = ws.cell(r, 21, value=item.get('ghi_chu', ''))
+            c21.alignment = align_left_top
+            
+            for c_idx in range(1, len(headers) + 1):
+                cell = ws.cell(r, c_idx)
+                cell.font = font_body
+                cell.border = thin_border
 
     # Dòng Tổng Cộng
-    total_row = len(items) + 2
+    total_row = current_row + 1
     ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=15)
     c_tot_label = ws.cell(total_row, 1, value="TỔNG CỘNG")
     c_tot_label.alignment = Alignment(horizontal='center', vertical='center')
@@ -1042,34 +1124,69 @@ if raw_files:
     ])
     
     with tab_detail:
-        st.markdown("##### 📋 Toàn bộ thông tin chi tiết hóa đơn (Mỗi hóa đơn là 1 hàng)")
-        st.caption("Bao gồm đầy đủ: Tên, MST, Địa chỉ Bên bán & Bên mua; Tên hàng hóa, ĐVT, Số lượng, Đơn giá, Thành tiền, Thuế và Tổng thanh toán.")
+        st.markdown("##### 📋 Toàn bộ thông tin chi tiết hóa đơn (Tách riêng mỗi mặt hàng / vật tư là 1 dòng)")
+        st.caption("Mỗi mặt hàng được tách thành 1 dòng riêng biệt; thông tin hóa đơn (Số HĐ, Ký hiệu, Ngày HĐ, Bên bán, Bên mua) được giữ chung.")
         if valid_items:
-            df_detail = pd.DataFrame([
-                {
-                    'STT': idx + 1,
-                    'Tên file': it['filename'],
-                    'Ký hiệu HĐ': it['ky_hieu_hd'],
-                    'Số HĐ': it['so_hd'],
-                    'Ngày HĐ': it['ngay_hd'].strftime('%d/%m/%Y') if isinstance(it['ngay_hd'], (datetime.datetime, datetime.date)) else str(it['ngay_hd']),
-                    'ĐV bán (Chủ đầu tư)': it['seller_name'],
-                    'MST ĐV bán': it['seller_mst'],
-                    'Địa chỉ ĐV bán': it['seller_addr'],
-                    'Khách hàng (Bên mua)': it['buyer_name'],
-                    'MST Khách hàng': it['buyer_mst'],
-                    'Địa chỉ Khách hàng': it['buyer_addr'],
-                    'Tên hàng hóa dịch vụ': it['item_name_str'],
-                    'ĐVT': it['item_unit_str'],
-                    'Số lượng': it['item_qty_str'],
-                    'Đơn giá': it['item_price_str'],
-                    'Tiền chưa thuế': f"{it['tien_truoc_thue']:,}".replace(',', ' '),
-                    'Thuế suất': f"{it['thue_suat']}%" if isinstance(it['thue_suat'], int) else str(it['thue_suat']),
-                    'Tiền thuế': f"{it['tien_thue']:,}".replace(',', ' '),
-                    'Tổng thanh toán': f"{it['tong_tien_tt']:,}".replace(',', ' '),
-                    'Tiền bằng chữ': it['tien_bang_chu']
-                }
-                for idx, it in enumerate(valid_items)
-            ])
+            flattened_rows = []
+            for it in valid_items:
+                sub_items = it.get('items', [])
+                if not sub_items:
+                    sub_items = [{
+                        'stt': '1',
+                        'name': it.get('item_name_str', '') or it.get('noi_dung', ''),
+                        'unit': it.get('item_unit_str', ''),
+                        'quantity': it.get('item_qty_str', ''),
+                        'price': it.get('item_price_str', ''),
+                        'amount': it.get('tien_truoc_thue', 0)
+                    }]
+                num_sub = len(sub_items)
+                ts = it.get('thue_suat', 0)
+                
+                for sub in sub_items:
+                    raw_amt = sub.get('amount', 0)
+                    amt = parse_numeric(raw_amt)
+                    if amt == 0 and num_sub == 1:
+                        amt = it.get('tien_truoc_thue', 0)
+                    
+                    if num_sub == 1:
+                        tax = it.get('tien_thue', 0)
+                    elif isinstance(ts, (int, float)) and ts > 0:
+                        tax = round(amt * ts / 100)
+                    else:
+                        tax = 0
+                    tot = amt + tax
+                    
+                    raw_q = sub.get('quantity', '')
+                    raw_p = sub.get('price', '')
+                    q_val = parse_numeric(raw_q) if raw_q != '' else ''
+                    p_val = parse_numeric(raw_p) if raw_p != '' else ''
+                    
+                    q_disp = f"{q_val:,}".replace(',', '.') if isinstance(q_val, int) else (f"{q_val:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.') if isinstance(q_val, float) else str(raw_q))
+                    p_disp = f"{p_val:,}".replace(',', '.') if isinstance(p_val, int) else (f"{p_val:,.3f}".replace(',', 'X').replace('.', ',').replace('X', '.') if isinstance(p_val, float) else str(raw_p))
+
+                    flattened_rows.append({
+                        'STT': len(flattened_rows) + 1,
+                        'Tên file': it['filename'],
+                        'Ký hiệu HĐ': it['ky_hieu_hd'],
+                        'Số HĐ': it['so_hd'],
+                        'Ngày HĐ': it['ngay_hd'].strftime('%d/%m/%Y') if isinstance(it['ngay_hd'], (datetime.datetime, datetime.date)) else str(it['ngay_hd']),
+                        'ĐV bán (Chủ đầu tư)': it['seller_name'],
+                        'MST ĐV bán': it['seller_mst'],
+                        'Địa chỉ ĐV bán': it['seller_addr'],
+                        'Khách hàng (Bên mua)': it['buyer_name'],
+                        'MST Khách hàng': it['buyer_mst'],
+                        'Địa chỉ Khách hàng': it['buyer_addr'],
+                        'Tên hàng hóa dịch vụ': sub.get('name', ''),
+                        'ĐVT': sub.get('unit', ''),
+                        'Số lượng': q_disp,
+                        'Đơn giá': p_disp,
+                        'Thành tiền (chưa thuế)': f"{amt:,}".replace(',', ' '),
+                        'Thuế suất': f"{ts}%" if isinstance(ts, int) else str(ts),
+                        'Tiền thuế': f"{tax:,}".replace(',', ' '),
+                        'Tổng thanh toán': f"{tot:,}".replace(',', ' '),
+                        'Ghi chú': it.get('ghi_chu', '')
+                    })
+            df_detail = pd.DataFrame(flattened_rows)
             st.dataframe(df_detail, use_container_width=True, height=500)
 
     with tab_view:
