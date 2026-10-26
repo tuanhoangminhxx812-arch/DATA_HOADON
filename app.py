@@ -75,6 +75,53 @@ if not os.path.exists(DEFAULT_TEMPLATE_PATH):
 
 # ----------------- PARSER FUNCTIONS ----------------- #
 
+def clean_mst(s):
+    """Làm sạch mã số thuế (bỏ khoảng trắng giữa các chữ số, giữ dấu gạch ngang nhánh)."""
+    if not s: return ''
+    cleaned = re.sub(r'[^\d-]', '', str(s))
+    m = re.search(r'(\d{10}(?:-\d{3})?)', cleaned)
+    return m.group(1) if m else cleaned
+
+def clean_address(s):
+    """Làm sạch địa chỉ, loại bỏ nhãn và các thông tin số điện thoại/email dính kèm."""
+    if not s: return ''
+    s = re.sub(r'\(Address\):?', '', s, flags=re.IGNORECASE)
+    s = re.split(r'(?:Điện\s*thoại|Tel|Phone|Email|Số\s*tài\s*khoản|Bank\s*A/c)', s, flags=re.IGNORECASE)[0]
+    return re.sub(r'\s+', ' ', s).strip(' :,.-')
+
+def clean_text_line(s):
+    """Chuẩn hóa khoảng trắng cho một dòng văn bản."""
+    if not s: return ''
+    return re.sub(r'\s+', ' ', str(s)).strip()
+
+def parse_numeric(s):
+    """
+    Chuyển đổi chuỗi số (có dấu chấm hoặc phẩy hàng nghìn/thập phân) thành số int/float an toàn và chuẩn xác.
+    Hỗ trợ cả chuẩn Việt Nam (19.158.600, 24.000,221) và quốc tế.
+    """
+    if s is None or s == '': return 0
+    if isinstance(s, (int, float)): return s
+    s_clean = re.sub(r'\s+', '', str(s))
+    if ',' in s_clean and '.' in s_clean:
+        if s_clean.rfind(',') > s_clean.rfind('.'):
+            s_clean = s_clean.replace('.', '').replace(',', '.')
+        else:
+            s_clean = s_clean.replace(',', '')
+    elif ',' in s_clean:
+        if s_clean.count(',') == 1 and len(s_clean.split(',')[1]) <= 3:
+            s_clean = s_clean.replace(',', '.')
+        else:
+            s_clean = s_clean.replace(',', '')
+    elif '.' in s_clean:
+        parts = s_clean.split('.')
+        if len(parts) > 1 and all(len(p) == 3 for p in parts[1:]):
+            s_clean = ''.join(parts)
+    try:
+        val = float(s_clean)
+        return int(val) if val.is_integer() else val
+    except:
+        return 0
+
 def extract_period(text, nlap):
     """
     Trích xuất kỳ tiền điện (vd: T08-2026, T07-2026...) từ nội dung hàng hóa dịch vụ THHDVu.
@@ -131,7 +178,7 @@ def clean_tax_rate(val):
 
 def parse_xml_invoice(content_bytes, filename=""):
     """
-    Phân tích cú pháp file hóa đơn điện tử XML đầy đủ chi tiết.
+    Phân tích cú pháp file hóa đơn điện tử XML đầy đủ chi tiết theo chuẩn Tổng cục Thuế (NĐ 123 / TT 78).
     """
     try:
         root = ET.fromstring(content_bytes)
@@ -151,27 +198,26 @@ def parse_xml_invoice(content_bytes, filename=""):
         nlap_date = nlap_str
         
     thhdvu = (root.find('.//THHDVu').text or '').strip() if root.find('.//THHDVu') is not None else ''
-    period = extract_period(thhdvu, nlap_str)
     
     # 1. Đơn vị bán (Chủ đầu tư)
     ten_nban = (root.find('.//NBan/Ten').text or '').strip() if root.find('.//NBan/Ten') is not None else ''
     mst_nban = (root.find('.//NBan/MST').text or '').strip() if root.find('.//NBan/MST') is not None else ''
     dchi_nban = (root.find('.//NBan/DChi').text or '').strip() if root.find('.//NBan/DChi') is not None else ''
-    if mst_nban.isdigit() and not mst_nban.startswith('0'):
-        mst_val = int(mst_nban)
-    else:
-        mst_val = mst_nban
+    mst_val = clean_mst(mst_nban)
 
     # 2. Khách hàng (Bên mua)
     ten_nmua = (root.find('.//NMua/Ten').text or '').strip() if root.find('.//NMua/Ten') is not None else ''
-    if not ten_nmua and root.find('.//NMua/HVTNMHang') is not None:
-        ten_nmua = (root.find('.//NMua/HVTNMHang').text or '').strip()
-    mst_nmua = (root.find('.//NMua/MST').text or '').strip() if root.find('.//NMua/MST') is not None else ''
+    buyer_person = (root.find('.//NMua/HVTNMHang').text or '').strip() if root.find('.//NMua/HVTNMHang') is not None else ''
+    if not ten_nmua and buyer_person:
+        ten_nmua = buyer_person
+    mst_nmua = clean_mst((root.find('.//NMua/MST').text or '').strip() if root.find('.//NMua/MST') is not None else '')
     dchi_nmua = (root.find('.//NMua/DChi').text or '').strip() if root.find('.//NMua/DChi') is not None else ''
 
     # 3. Danh sách hàng hóa, dịch vụ
     items = []
+    xml_notes = []
     for hhdvu in root.findall('.//DSHHDVu/HHDVu'):
+        tchat = (hhdvu.find('TChat').text or '').strip() if hhdvu.find('TChat') is not None else '1'
         stt_i = (hhdvu.find('STT').text or '').strip() if hhdvu.find('STT') is not None else ''
         th_i = (hhdvu.find('THHDVu').text or '').strip() if hhdvu.find('THHDVu') is not None else ''
         dvt_i = (hhdvu.find('DVTinh').text or '').strip() if hhdvu.find('DVTinh') is not None else ''
@@ -179,7 +225,11 @@ def parse_xml_invoice(content_bytes, filename=""):
         dg_i = (hhdvu.find('DGia').text or '').strip() if hhdvu.find('DGia') is not None else ''
         tt_i = (hhdvu.find('ThTien').text or '').strip() if hhdvu.find('ThTien') is not None else ''
         
-        # Bỏ số 0 thừa sau dấu phẩy thập phân nếu là số nguyên
+        # Nếu là dòng ghi chú (TChat == '4' hoặc không có số lượng/đơn giá/thành tiền)
+        if tchat == '4' or (not sl_i and not dg_i and (not tt_i or parse_numeric(tt_i) == 0) and th_i):
+            xml_notes.append(th_i)
+            continue
+            
         try:
             if sl_i and float(sl_i).is_integer():
                 sl_i = str(int(float(sl_i)))
@@ -192,7 +242,7 @@ def parse_xml_invoice(content_bytes, filename=""):
 
         if th_i or tt_i:
             items.append({
-                'stt': stt_i,
+                'stt': stt_i if stt_i else str(len(items) + 1),
                 'name': th_i,
                 'unit': dvt_i,
                 'quantity': sl_i,
@@ -200,7 +250,6 @@ def parse_xml_invoice(content_bytes, filename=""):
                 'amount': tt_i
             })
 
-    # Nếu không có thẻ HHDVu chi tiết thì lấy thhdvu chung
     if not items and thhdvu:
         items.append({
             'stt': '1',
@@ -211,21 +260,12 @@ def parse_xml_invoice(content_bytes, filename=""):
             'amount': ''
         })
 
-    # Ghép chuỗi để hiển thị 1 ô trong Excel
-    if len(items) > 1:
-        names_str = '\n'.join([f"{idx+1}. {it['name']}" for idx, it in enumerate(items)])
-        units_str = '\n'.join([it['unit'] for it in items])
-        qtys_str = '\n'.join([str(it['quantity']) for it in items])
-        prices_str = '\n'.join([str(it['price']) for it in items])
-        amounts_str = '\n'.join([str(it['amount']) for it in items])
-    elif len(items) == 1:
-        names_str = items[0]['name']
-        units_str = items[0]['unit']
-        qtys_str = str(items[0]['quantity'])
-        prices_str = str(items[0]['price'])
-        amounts_str = str(items[0]['amount'])
-    else:
-        names_str, units_str, qtys_str, prices_str, amounts_str = '', '', '', '', ''
+    # Ghép chuỗi hiển thị
+    names_str = '\n'.join([f"{idx+1}. {it['name']}" for idx, it in enumerate(items)]) if len(items) > 1 else (items[0]['name'] if items else '')
+    units_str = '\n'.join([it['unit'] for it in items]) if items else ''
+    qtys_str = '\n'.join([str(it['quantity']) for it in items]) if items else ''
+    prices_str = '\n'.join([str(it['price']) for it in items]) if items else ''
+    amounts_str = '\n'.join([str(it['amount']) for it in items]) if items else ''
 
     # 4. Tài chính
     tgtcthue = root.find('.//TgTCThue')
@@ -254,11 +294,20 @@ def parse_xml_invoice(content_bytes, filename=""):
     tgtttbchu = root.find('.//TgTTTBChu')
     tien_bang_chu = (tgtttbchu.text or '').strip() if tgtttbchu is not None else ''
     
-    # Có thuế khi tiền thuế > 0 và mức thuế không phải 0 / KCT
     is_taxable = (tien_thue > 0) and (tsuat_val not in [0, '0', '0%', 'KCT', 'KKKNT'])
     
-    noi_dung = f'Thuế GTGT điện MTMN {period}'
-    nd = f'ĐIỆN MTMN {period}'
+    is_mtmn = any(w in (thhdvu + names_str).lower() for w in ['mặt trời', 'mtmn', 'áp mái', 'kwh', 'bán điện'])
+    if is_mtmn:
+        period = extract_period(thhdvu or names_str, nlap_str)
+        noi_dung = f'Thuế GTGT điện MTMN {period}'
+        nd = f'ĐIỆN MTMN {period}'
+    else:
+        period = f'T{nlap_date.month:02d}-{nlap_date.year}' if isinstance(nlap_date, (datetime.datetime, datetime.date)) else 'T08-2026'
+        item_summary = items[0]['name'] if items else thhdvu
+        nd = item_summary[:60] if item_summary else f'HĐ {sh_num} {period}'
+        noi_dung = f'Thuế GTGT {nd}'
+        
+    ghi_chu = ' '.join(xml_notes)
     
     return {
         'filename': filename,
@@ -275,11 +324,11 @@ def parse_xml_invoice(content_bytes, filename=""):
         'tien_truoc_thue': tien_truoc_thue,
         'thue_suat': tsuat_val,
         'is_taxable': is_taxable,
-        # Thông tin mở rộng đầy đủ
         'seller_name': ten_nban,
         'seller_mst': mst_val,
         'seller_addr': dchi_nban,
         'buyer_name': ten_nmua,
+        'buyer_person': buyer_person,
         'buyer_mst': mst_nmua,
         'buyer_addr': dchi_nmua,
         'items': items,
@@ -290,12 +339,13 @@ def parse_xml_invoice(content_bytes, filename=""):
         'item_amount_str': amounts_str,
         'tong_tien_tt': tong_tien_tt,
         'tien_bang_chu': tien_bang_chu,
-        'ghi_chu': ''
+        'ghi_chu': ghi_chu
     }
 
 def parse_pdf_invoice(content_bytes, filename=""):
     """
-    Phân tích cú pháp file hóa đơn điện tử PDF (TT78 / NĐ123) đầy đủ chi tiết.
+    Phân tích cú pháp file hóa đơn điện tử PDF (TT78 / NĐ123) đầy đủ, chính xác và chuyên sâu.
+    Sử dụng cơ chế layout text và lọc thông minh để trích xuất chuẩn Bên bán, Bên mua, bảng Hàng hóa, Thuế và Tổng tiền.
     """
     if pypdf is None:
         raise ValueError("Thư viện pypdf chưa được cài đặt!")
@@ -305,191 +355,201 @@ def parse_pdf_invoice(content_bytes, filename=""):
     except Exception as e:
         raise ValueError(f"Không thể đọc file PDF ({e})")
         
-    full_text = ""
-    for page in reader.pages:
-        txt = page.extract_text() or ""
-        full_text += txt + "\n"
+    pages_layout = []
+    pages_plain = []
+    for p in reader.pages:
+        try:
+            pages_layout.append(p.extract_text(extraction_mode='layout') or '')
+        except:
+            pages_layout.append('')
+        pages_plain.append(p.extract_text() or '')
         
-    if not full_text.strip():
+    full_layout = '\n'.join(pages_layout)
+    full_plain = '\n'.join(pages_plain)
+    
+    text_primary = full_layout if len(full_layout.strip()) > 50 else full_plain
+    if not text_primary.strip():
         raise ValueError("File PDF không chứa văn bản (có thể là file scan/ảnh dạng PDF).")
         
-    lines = [line.strip() for line in full_text.split('\n') if line.strip()]
-    
-    # 1. Ký hiệu
-    full_kh = ""
-    m_full_kh = re.search(r'\b([12][A-Z]\d{2}[A-Z]{3})\b', full_text)
-    if m_full_kh:
-        full_kh = m_full_kh.group(1)
-    else:
-        m_ms = re.search(r'(?:Mẫu\s*số|Ký\s*hiệu\s*mẫu\s*số)[:\s]*([12][A-Z]?)', full_text, re.IGNORECASE)
-        khms = m_ms.group(1).strip() if m_ms else "1"
-        m_kh = re.search(r'(?:Ký\s*hiệu|Ký\s*hiệu\s*HĐ|Serial)[:\s]*([A-Z0-9]{5,8})', full_text, re.IGNORECASE)
-        kh = m_kh.group(1).strip() if m_kh else "C26MHC"
-        full_kh = khms + kh if not kh.startswith(khms) else kh
-
-    # 2. Số hóa đơn
-    sh_num = 1
-    m_sh = re.search(r'(?:\(No\.\)[:\s]*Số|Số\s*hóa\s*đơn|Số\s*HĐ|Số\s*\(No\.\)|Số/No\.)[:\s]*0*(\d+)', full_text, re.IGNORECASE)
+    # 1. Ký hiệu HĐ
+    ky_hieu_hd = ''
+    m_kh = re.search(r'(?:Ký\s*hiệu|Sign|Serial).*?([12][A-Z]\d{2}[A-Z]{3})', text_primary, re.IGNORECASE)
+    if not m_kh:
+        m_kh = re.search(r'\b([12][A-Z]\d{2}[A-Z]{3})\b', text_primary)
+    if m_kh:
+        ky_hieu_hd = m_kh.group(1).strip()
+        
+    # 2. Số HĐ (Bắt buộc phải có chỉ báo Số/No để tránh nhầm số nhà, số thửa đất trong địa chỉ)
+    so_hd = 0
+    pat_sh = re.compile(r'(?:Số\s*(?:hóa\s*đơn|HĐ)|(?:Số|No)\s*[:/]?\s*\([^\)]*(?:No|Số)[^\)]*\)|\([^\)]*(?:No|Số)[^\)]*\)\s*[:/]?\s*(?:Số|No))\s*[:.]?\s*(\d+)', re.IGNORECASE)
+    m_sh = pat_sh.search(text_primary)
+    if not m_sh:
+        m_sh = re.search(r'\b(?:Số|No\.?)\s*[:.]\s*0*(\d+)', text_primary, re.IGNORECASE)
     if m_sh:
-        sh_num = int(m_sh.group(1))
+        so_hd = int(m_sh.group(1))
     else:
-        m_file_sh = re.search(r'-\s*0*(\d+)(?:\.pdf)?$', filename, re.IGNORECASE)
-        if m_file_sh:
-            sh_num = int(m_file_sh.group(1))
-        else:
-            m_any_no = re.search(r'\bNo\.[:\s]*0*(\d+)', full_text, re.IGNORECASE)
-            if m_any_no:
-                sh_num = int(m_any_no.group(1))
-
-    # 3. Ngày hóa đơn
-    nlap_date = datetime.datetime.now()
-    m_date1 = re.search(r'Ngày(?:\s*\(Date\))?\s*0?(\d{1,2})\s*tháng(?:\s*\(month\))?\s*0?(\d{1,2})\s*năm(?:\s*\(year\))?\s*(\d{4})', full_text, re.IGNORECASE)
-    if m_date1:
-        d, m, y = int(m_date1.group(1)), int(m_date1.group(2)), int(m_date1.group(3))
-        nlap_date = datetime.datetime(y, m, d)
+        m_fn = re.search(r'-\s*0*(\d+)(?:\.pdf)?$', filename, re.IGNORECASE)
+        if m_fn: so_hd = int(m_fn.group(1))
+        
+    # 3. Ngày HĐ
+    ngay_hd = datetime.datetime.now()
+    m_date = re.search(r'Ngày.*?\s+(\d{1,2})\s+tháng.*?\s+(\d{1,2})\s+năm.*?\s+(\d{4})', text_primary, re.IGNORECASE)
+    if not m_date:
+        m_date = re.search(r'(?:Ngày\s*lập|Ngày\s*HĐ|Ngày\s*ký|Ký\s*ngày).*?[:\s](\d{1,2})[/.-](\d{1,2})[/.-](\d{4})', text_primary, re.IGNORECASE)
+    if m_date:
+        d, m, y = int(m_date.group(1)), int(m_date.group(2)), int(m_date.group(3))
+        ngay_hd = datetime.datetime(y, m, d)
+        
+    # 4. Phân đoạn Người Bán & Người Mua
+    title_match = re.search(r'HÓA\s*ĐƠN\s*(?:GIÁ\s*TRỊ\s*GIA\s*TĂNG|BÁN\s*HÀNG|ĐIỆN\s*TỬ|\([^\)]*VAT[^\)]*\))', text_primary, re.IGNORECASE)
+    if title_match:
+        seller_block = text_primary[:title_match.start()]
+        after_title = text_primary[title_match.end():]
     else:
-        m_date2 = re.search(r'(?:Ngày\s*lập|Ngày\s*HĐ|Ngày)[:\s]*0?(\d{1,2})[/.-]0?(\d{1,2})[/.-](\d{4})', full_text, re.IGNORECASE)
-        if m_date2:
-            d, m, y = int(m_date2.group(1)), int(m_date2.group(2)), int(m_date2.group(3))
-            nlap_date = datetime.datetime(y, m, d)
-
-    # 4. Bên bán (Chủ đầu tư)
-    ten_nban = ""
-    m_seller_start = re.search(r'^(.*?)\s*Mã số thuế', full_text, re.DOTALL)
-    if m_seller_start:
-        ten_nban = re.sub(r'\s+', ' ', m_seller_start.group(1).strip())
+        seller_block = text_primary[:len(text_primary)//3]
+        after_title = text_primary[len(text_primary)//3:]
+        
+    table_hdr = re.search(r'STT\s+.*?Tên\s*hàng\s*hóa', after_title, re.IGNORECASE)
+    if table_hdr:
+        buyer_block = after_title[:table_hdr.start()]
     else:
-        m_ten = re.search(r'(?:Đơn\s*vị\s*bán(?:\s*hàng)?|Tên\s*người\s*bán|Người\s*bán)[:\s]*([^\n\r]+)', full_text, re.IGNORECASE)
-        if m_ten:
-            ten_nban = m_ten.group(1).strip()
-        else:
-            for line in lines[:15]:
-                if line.upper().startswith(('CÔNG TY', 'CTY', 'DOANH NGHIỆP', 'DNTN', 'CHI NHÁNH')):
-                    ten_nban = line
-                    break
-
-    m_seller_mst = re.search(r'Mã\s*số\s*thuế.*?:\s*([0-9]{10}(?:-[0-9]{3})?)', full_text)
-    seller_mst_str = m_seller_mst.group(1) if m_seller_mst else ""
-    if not seller_mst_str:
-        m_mst_list = re.findall(r'(?:Mã\s*số\s*thuế|MST)(?:\s*\(Tax\s*code\))?[:\s]*([0-9]{10}(?:-[0-9]{3})?)', full_text, re.IGNORECASE)
-        seller_mst_str = m_mst_list[0] if m_mst_list else ""
-
-    mst_val = int(seller_mst_str) if seller_mst_str.isdigit() and not seller_mst_str.startswith('0') else seller_mst_str
-
-    m_seller_addr = re.search(r'Địa\s*chỉ\s*(.*?)\s*\(Address\):', full_text, re.IGNORECASE)
-    seller_addr = re.sub(r'\s+', ' ', m_seller_addr.group(1).strip()) if m_seller_addr else ""
-    if not seller_addr:
-        m_addr_gen = re.search(r'Địa\s*chỉ[:\s]*([^\n\r]+)', full_text, re.IGNORECASE)
-        seller_addr = m_addr_gen.group(1).strip() if m_addr_gen else ""
-
-    # 5. Khách hàng (Bên mua)
-    buyer_name = ""
-    m_buyer_name = re.search(r'Tên\s*đơn\s*vị\s*\(Company name\):\s*([^\n]+(?:\n[^\n]+)?)', full_text, re.IGNORECASE)
-    if m_buyer_name:
-        buyer_name = re.sub(r'\s+', ' ', m_buyer_name.group(1).strip())
-    else:
-        m_bname2 = re.search(r'(?:Tên\s*người\s*mua|Họ\s*tên\s*người\s*mua|Đơn\s*vị\s*mua)[:\s]*([^\n\r]+)', full_text, re.IGNORECASE)
-        buyer_name = m_bname2.group(1).strip() if m_bname2 else ""
-
-    buyer_mst = ""
-    m_buyer_mst = re.search(r'\(Tax code\):\s*Mã\s*số\s*thuế\s*([0-9]{10}(?:-[0-9]{3})?)', full_text, re.IGNORECASE)
-    if m_buyer_mst:
-        buyer_mst = m_buyer_mst.group(1).strip()
-    else:
-        m_bmst2 = re.search(r'Mã\s*số\s*thuế\s*người\s*mua[:\s]*([0-9]{10}(?:-[0-9]{3})?)', full_text, re.IGNORECASE)
-        buyer_mst = m_bmst2.group(1).strip() if m_bmst2 else ""
-
-    buyer_addr = ""
-    m_buyer_addr = re.search(r'Địa\s*chỉ\s*\(Address\):\s*([^\n]+)', full_text, re.IGNORECASE)
-    if m_buyer_addr:
-        buyer_addr = re.sub(r'\s+', ' ', m_buyer_addr.group(1).strip())
-
-    # 6. Danh sách hàng hóa dịch vụ (Dạng bảng hoặc đơn lẻ)
-    items = []
-    pattern_row = r'^(\d+)\s+(.+?)\s+([A-Za-zÀ-ỹ\w]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)$'
-    for line in lines:
-        m = re.match(pattern_row, line)
-        if m:
-            stt_p, name_p, unit_p, qty_p, price_p, total_p = m.groups()
-            items.append({
-                'stt': stt_p,
-                'name': name_p.strip(),
-                'unit': unit_p.strip(),
-                'quantity': qty_p.strip(),
-                'price': price_p.strip(),
-                'amount': total_p.strip()
-            })
-
-    # Tìm diễn giải / ghi chú trích yếu nếu có
-    ghi_chu = ""
-    m_gc = re.search(r'(Điều động VTTB[^\n]+(?:\n[^\n]+)*)', full_text)
-    if m_gc:
-        ghi_chu = re.sub(r'\s+', ' ', m_gc.group(1).split('1 Nối bọc')[0].strip())
-
-    if len(items) > 1:
-        names_str = '\n'.join([f"{idx+1}. {it['name']}" for idx, it in enumerate(items)])
-        units_str = '\n'.join([it['unit'] for it in items])
-        qtys_str = '\n'.join([str(it['quantity']) for it in items])
-        prices_str = '\n'.join([str(it['price']) for it in items])
-        amounts_str = '\n'.join([str(it['amount']) for it in items])
-    elif len(items) == 1:
-        names_str = items[0]['name']
-        units_str = items[0]['unit']
-        qtys_str = str(items[0]['quantity'])
-        prices_str = str(items[0]['price'])
-        amounts_str = str(items[0]['amount'])
-    else:
-        # Nếu không có bảng dạng này, dùng nội dung phát hiện
-        names_str = ghi_chu if ghi_chu else f'ĐIỆN MTMN {nlap_date.strftime("%m/%Y")}'
-        units_str, qtys_str, prices_str, amounts_str = '', '', '', ''
-
-    # 7. Tiền trước thuế, Thuế, Thuế suất
-    def parse_money(s):
-        if not s: return 0
-        cleaned = re.sub(r'[^\d]', '', str(s))
-        return int(cleaned) if cleaned else 0
-
-    tien_truoc_thue = 0
-    tien_thue = 0
-    thue_suat = 8
+        buyer_block = after_title[:1000]
+        
+    # --- Bên bán (Seller) ---
+    s_lines = [l.strip() for l in seller_block.split('\n') if l.strip()]
+    seller_name_parts = []
+    for l in s_lines:
+        if any(w in l.lower() for w in ['meinvoice', 'misa.com.vn', 'tra cứu tại website', 'mã tra cứu', 'phát hành bởi', 'khởi tạo từ', 'bản thể hiện']):
+            continue
+        if 'mã số thuế' in l.lower() or 'tax code' in l.lower():
+            break
+        seller_name_parts.append(l)
+    seller_name = clean_text_line(' '.join(seller_name_parts))
     
-    m_ttt = re.search(r'(?:Cộng\s*tiền\s*hàng|Tổng\s*tiền\s*chưa\s*thuế|Tiền\s*trước\s*thuế|Tổng\s*cộng\s*tiền\s*hàng)(?:\s*\([^\)]*\))?[:\s]*([\d.,]+)', full_text, re.IGNORECASE)
-    if m_ttt:
-        tien_truoc_thue = parse_money(m_ttt.group(1))
-    elif items:
-        # Fallback tính tổng thành tiền từ các dòng hàng
+    m_smst = re.search(r'(?:Mã\s*số\s*thuế|Tax\s*code).*?[:\s]*([0-9\s]{10,25}(?:-[0-9]{3})?)', seller_block, re.IGNORECASE)
+    seller_mst = clean_mst(m_smst.group(1)) if m_smst else ''
+    
+    m_saddr = re.search(r'Địa\s*chỉ.*?:?\s*([^\n\r]+(?:\n\s{15,}[^\n\r]+)?)', seller_block, re.IGNORECASE)
+    seller_addr = clean_address(m_saddr.group(1)) if m_saddr else ''
+    
+    # --- Bên mua (Buyer) ---
+    m_bname = re.search(r'Tên\s*đơn\s*vị.*?:?\s*([^\n\r]+(?:\n\s{20,}[^\n\r]+)?)', buyer_block, re.IGNORECASE)
+    if m_bname:
+        b_name_raw = m_bname.group(1)
+        b_name_raw = re.sub(r'\(Company[\'s\s]*name\):?', '', b_name_raw, flags=re.IGNORECASE)
+        buyer_name = clean_text_line(b_name_raw)
+    else:
+        buyer_name = ''
+        
+    m_buyer_person = re.search(r'Họ\s*tên\s*người\s*mua(?:\s*hàng)?(?:\s*\([^\)]*\))?[:.\s]*([^\n\r]+)', buyer_block, re.IGNORECASE)
+    buyer_person = ''
+    if m_buyer_person:
+        p_raw = re.sub(r'^\s*(?:hàng|buyer|buyer\s*name)?\s*[:.)]?\s*', '', m_buyer_person.group(1), flags=re.IGNORECASE)
+        buyer_person = clean_text_line(p_raw)
+        if buyer_person.lower() in ['hàng', 'hàng:', 'người mua hàng', 'buyer', 'buyer name', '']:
+            buyer_person = ''
+            
+    if not buyer_name and buyer_person:
+        buyer_name = buyer_person
+        
+    m_bmst = re.search(r'Mã\s*số\s*thuế.*?:?\s*([0-9\s]{10,25}(?:-[0-9]{3})?)', buyer_block, re.IGNORECASE)
+    buyer_mst = clean_mst(m_bmst.group(1)) if m_bmst else ''
+    
+    m_baddr = re.search(r'Địa\s*chỉ.*?:?\s*([^\n\r]+(?:\n\s{15,}[^\n\r]+)?)', buyer_block, re.IGNORECASE)
+    buyer_addr = clean_address(m_baddr.group(1)) if m_baddr else ''
+    
+    # --- Danh sách Hàng hóa across pages ---
+    items = []
+    all_notes = []
+    pattern_row = re.compile(r'^\s*(\d+)\s{2,}(.+?)\s{2,}([^\s\d.,]+|\w+)\s{2,}([\d.,]+)\s{2,}([\d.,]+)\s{2,}([\d.,]+)\s*$', re.MULTILINE)
+    
+    for page in reader.pages:
         try:
-            tien_truoc_thue = sum([parse_money(it['amount']) for it in items])
+            layout = page.extract_text(extraction_mode='layout') or ''
         except:
-            pass
-
-    m_ts = re.search(r'(?:Thuế\s*suất\s*GTGT|Thuế\s*suất|VAT\s*rate)(?:\s*\([^\)]*\))?[:\s]*([0-9%]+|KCT|KKKNT)', full_text, re.IGNORECASE)
-    if m_ts:
-        ts_raw = m_ts.group(1).upper()
-        if 'KCT' in ts_raw or 'KKKNT' in ts_raw:
-            thue_suat = 'KCT'
+            layout = page.extract_text() or ''
+            
+        m_start = re.search(r'STT\s+.*?Tên\s*hàng\s*hóa', layout, re.IGNORECASE)
+        if not m_start:
+            if not pattern_row.search(layout):
+                continue
+            table_text = layout
         else:
-            m_num = re.search(r'(\d+)', ts_raw)
-            thue_suat = int(m_num.group(1)) if m_num else 8
+            table_text = layout[m_start.start():]
+            
+        m_end = re.search(r'(?:Cộng\s*tiền\s*hàng|Tổng\s*tiền\s*chưa\s*thuế|Thuế\s*suất\s*GTGT|Tổng\s*(?:cộng\s*)?tiền\s*thanh\s*toán)', table_text, re.IGNORECASE)
+        table_content = table_text[:m_end.start()] if m_end else table_text
+        
+        for m in pattern_row.finditer(table_content):
+            stt_i, name_i, unit_i, qty_i, price_i, amt_i = m.groups()
+            items.append({
+                'stt': stt_i.strip(),
+                'name': clean_text_line(name_i),
+                'unit': unit_i.strip(),
+                'quantity': qty_i.strip(),
+                'price': price_i.strip(),
+                'amount': amt_i.strip()
+            })
+            
+        for line in table_content.split('\n'):
+            l = line.strip()
+            if not l or len(l) < 5: continue
+            if pattern_row.match(line): continue
+            if re.search(r'^\s*[A-D]\s+[B-E]\s+[C-F]', l, re.IGNORECASE) or re.search(r'^[A-D\s=x*+1-5]+$', l, re.IGNORECASE):
+                continue
+            if any(w in l.lower() for w in [
+                'stt', 'tên hàng hóa', 'đvt', 'số lượng', 'đơn giá', 'thành tiền', 'name of goods',
+                '(description)', '(unit)', '(quantity)', '(unit price)', '(amount)',
+                'mã tra cứu', 'tra cứu tại', 'khởi tạo từ', 'cần kiểm tra', 'invoice code'
+            ]):
+                continue
+            all_notes.append(l)
 
-    m_tt = re.search(r'(?:Tiền\s*thuế\s*GTGT|Tiền\s*thuế|VAT\s*amount)(?:\s*\([^\)]*\))?[:\s]*([\d.,]+)', full_text, re.IGNORECASE)
-    if m_tt:
-        tien_thue = parse_money(m_tt.group(1))
-    elif isinstance(thue_suat, (int, float)) and thue_suat > 0 and tien_truoc_thue > 0:
+    ghi_chu = clean_text_line(' '.join(all_notes))
+    
+    # 5. Tài chính (Tiền trước thuế, Thuế suất, Tiền thuế, Tổng thanh toán, Bằng chữ)
+    m_ttt = re.search(r'(?:Cộng\s*tiền\s*hàng|Tổng\s*tiền\s*chưa\s*thuế|Tiền\s*hàng).*?[:\s]([\d.,]+)(?:\s*$|\s*\n)', text_primary, re.IGNORECASE)
+    tien_truoc_thue = parse_numeric(m_ttt.group(1)) if m_ttt else 0
+    if tien_truoc_thue == 0 and items:
+        tien_truoc_thue = sum(parse_numeric(it['amount']) for it in items)
+        
+    m_ts = re.search(r'Thuế\s*suất\s*(?:GTGT)?.*?:?\s*(\d+|KCT|KKKNT)\s*%', text_primary, re.IGNORECASE)
+    thue_suat = int(m_ts.group(1)) if m_ts and m_ts.group(1).isdigit() else (m_ts.group(1) if m_ts else 8)
+    
+    m_tt = re.search(r'Tiền\s*thuế\s*(?:GTGT)?.*?:?\s*([\d.,]+)(?:\s*$|\s*\n)', text_primary, re.IGNORECASE)
+    tien_thue = parse_numeric(m_tt.group(1)) if m_tt else 0
+    if tien_thue == 0 and isinstance(thue_suat, (int, float)) and thue_suat > 0 and tien_truoc_thue > 0:
         tien_thue = round(tien_truoc_thue * thue_suat / 100)
+        
+    m_all = re.search(r'Tổng\s*(?:cộng\s*)?tiền\s*thanh\s*toán.*?[:\s]([\d.,]+)(?:\s*$|\s*\n)', text_primary, re.IGNORECASE)
+    tong_tien_tt = parse_numeric(m_all.group(1)) if m_all else (tien_truoc_thue + tien_thue)
+    
+    # Số tiền bằng chữ
+    m_chu = re.search(r'Số\s*tiền\s*(?:viết\s*)?bằng\s*chữ.*?:?\s*([^\n\r]+(?:\n\s{20,}[^\n\r]+)?)', text_primary, re.IGNORECASE)
+    tien_bang_chu = ''
+    if m_chu:
+        c_raw = m_chu.group(1)
+        c_raw = re.sub(r'^[^\n\r:]*?bằng\s*chữ', '', c_raw, flags=re.IGNORECASE)
+        c_raw = re.sub(r'^\s*\([^\)]*words[^\)]*\)\s*[:.]?\s*', '', c_raw, flags=re.IGNORECASE)
+        tien_bang_chu = clean_text_line(c_raw.strip(' :.-/'))
+        
+    names_str = '\n'.join([f"{idx+1}. {it['name']}" for idx, it in enumerate(items)]) if len(items) > 1 else (items[0]['name'] if items else '')
+    units_str = '\n'.join([it['unit'] for it in items]) if items else ''
+    qtys_str = '\n'.join([str(it['quantity']) for it in items]) if items else ''
+    prices_str = '\n'.join([str(it['price']) for it in items]) if items else ''
+    amounts_str = '\n'.join([str(it['amount']) for it in items]) if items else ''
 
-    m_tong = re.search(r'Tổng cộng tiền thanh toán\s*([\d.,]+)', full_text, re.IGNORECASE)
-    if not m_tong:
-        m_tong = re.search(r'(?:Tổng\s*tiền\s*thanh\s*toán|Tổng\s*thanh\s*toán)[:\s]*([\d.,]+)', full_text, re.IGNORECASE)
-    tong_tien_tt = parse_money(m_tong.group(1)) if m_tong else (tien_truoc_thue + tien_thue)
-
-    m_chu = re.search(r'Số\s*tiền\s*bằng\s*chữ.*?:\s*([^\n\r]+)', full_text, re.IGNORECASE)
-    tien_bang_chu = m_chu.group(1).strip() if m_chu else ''
-
-    # 8. Kỳ phát điện & Nội dung
-    period = extract_period(full_text, nlap_date.strftime('%Y-%m-%d'))
-    noi_dung = f'Thuế GTGT điện MTMN {period}'
-    nd = f'ĐIỆN MTMN {period}'
+    is_mtmn = any(w in text_primary.lower() for w in ['mặt trời', 'mtmn', 'áp mái', 'kwh', 'bán điện'])
+    period = f'T{ngay_hd.month:02d}-{ngay_hd.year}'
+    if is_mtmn:
+        m_thang = re.search(r'(?:tháng|kỳ|T)\s*0?(\d{1,2})\s*[-/]\s*(\d{4})', text_primary, re.IGNORECASE)
+        if m_thang: period = f'T{int(m_thang.group(1)):02d}-{m_thang.group(2)}'
+        nd = f'ĐIỆN MTMN {period}'
+        noi_dung = f'Thuế GTGT điện MTMN {period}'
+    else:
+        item_summary = items[0]['name'] if items else ghi_chu
+        nd = item_summary[:60] if item_summary else f'HĐ {so_hd} {period}'
+        noi_dung = f'Thuế GTGT {nd}'
 
     is_taxable = (tien_thue > 0) and (thue_suat not in [0, '0', '0%', 'KCT', 'KKKNT'])
 
@@ -499,20 +559,20 @@ def parse_pdf_invoice(content_bytes, filename=""):
         'period': period,
         'tien_thue': tien_thue,
         'noi_dung': noi_dung,
-        'ky_hieu_hd': full_kh,
-        'so_hd': sh_num,
-        'ngay_hd': nlap_date,
-        'ten_kh': ten_nban,
-        'mst': mst_val,
+        'ky_hieu_hd': ky_hieu_hd,
+        'so_hd': so_hd,
+        'ngay_hd': ngay_hd,
+        'ten_kh': seller_name,
+        'mst': seller_mst,
         'nd': nd,
         'tien_truoc_thue': tien_truoc_thue,
         'thue_suat': thue_suat,
         'is_taxable': is_taxable,
-        # Thông tin mở rộng đầy đủ
-        'seller_name': ten_nban,
-        'seller_mst': mst_val,
+        'seller_name': seller_name,
+        'seller_mst': seller_mst,
         'seller_addr': seller_addr,
         'buyer_name': buyer_name,
+        'buyer_person': buyer_person,
         'buyer_mst': buyer_mst,
         'buyer_addr': buyer_addr,
         'items': items,
@@ -536,50 +596,12 @@ def parse_invoice_file(filename, file_bytes):
     elif fname_lower.endswith('.pdf'):
         return parse_pdf_invoice(file_bytes, filename)
     else:
-        # Thử XML trước, nếu không được thử PDF
         try:
             return parse_xml_invoice(file_bytes, filename)
         except:
             return parse_pdf_invoice(file_bytes, filename)
 
 # ----------------- EXCEL GENERATOR ----------------- #
-
-def parse_numeric(val):
-    """
-    Chuyển đổi chuỗi số (có dấu chấm hoặc phẩy) thành số int/float an toàn.
-    """
-    if val is None or val == '':
-        return 0
-    if isinstance(val, (int, float)):
-        return val
-    s = str(val).strip()
-    cleaned = re.sub(r'[^\d.,]', '', s)
-    if not cleaned:
-        return 0
-    if '.' in cleaned and ',' in cleaned:
-        cleaned = cleaned.replace('.', '').replace(',', '.')
-        try:
-            return float(cleaned)
-        except:
-            return 0
-    if ',' in cleaned and '.' not in cleaned:
-        cleaned = cleaned.replace(',', '.')
-        try:
-            return float(cleaned)
-        except:
-            return 0
-    if '.' in cleaned:
-        parts = cleaned.split('.')
-        if len(parts) > 1 and all(len(p) == 3 for p in parts[1:]):
-            return int(''.join(parts))
-        try:
-            return float(cleaned)
-        except:
-            return 0
-    try:
-        return int(cleaned) if cleaned.isdigit() else float(cleaned)
-    except:
-        return 0
 
 def create_detail_invoice_sheet(wb, items):
     """
@@ -1184,6 +1206,7 @@ if raw_files:
                         'Thuế suất': f"{ts}%" if isinstance(ts, int) else str(ts),
                         'Tiền thuế': f"{tax:,}".replace(',', ' '),
                         'Tổng thanh toán': f"{tot:,}".replace(',', ' '),
+                        'Số tiền bằng chữ': it.get('tien_bang_chu', ''),
                         'Ghi chú': it.get('ghi_chu', '')
                     })
             df_detail = pd.DataFrame(flattened_rows)
