@@ -603,14 +603,17 @@ def parse_invoice_file(filename, file_bytes):
 
 # ----------------- EXCEL GENERATOR ----------------- #
 
-def create_detail_invoice_sheet(wb, items):
+def create_detail_invoice_sheet(wb, items, at_front=False):
     """
     Tạo sheet riêng biệt 'THÔNG TIN HÓA ĐƠN' chứa toàn bộ thông tin chi tiết:
     - Đơn vị bán (Chủ đầu tư) & Khách hàng (Bên mua): Tên, MST, Địa chỉ
     - Tách riêng mỗi mặt hàng / vật tư là 1 dòng độc lập trong Excel.
     - Thông tin hóa đơn (Số HĐ, Ký hiệu, Ngày HĐ, Bên bán, Bên mua) được giữ chung cho các dòng cùng 1 hóa đơn.
     """
-    ws = wb.create_sheet(title='THÔNG TIN HÓA ĐƠN', index=0)
+    if at_front:
+        ws = wb.create_sheet(title='THÔNG TIN HÓA ĐƠN', index=0)
+    else:
+        ws = wb.create_sheet(title='THÔNG TIN HÓA ĐƠN')
     
     headers = [
         'STT', 'Tên file', 'Ký hiệu HĐ', 'Số HĐ', 'Ngày HĐ',
@@ -855,11 +858,11 @@ def create_detail_invoice_sheet(wb, items):
     # Cố định dòng 1 và 4 cột đầu
     ws.freeze_panes = 'E2'
 
-def generate_excel_bytes(valid_items, template_bytes_or_path):
+def generate_excel_bytes(valid_items, template_bytes_or_path, primary_sheet='dataload'):
     """
     Sinh file Excel hoàn chỉnh:
-    - Sheet 1 (MỚI): 'THÔNG TIN HÓA ĐƠN' - Lấy toàn bộ thông tin chi tiết hóa đơn (mỗi HĐ là 1 dòng, mỗi thông tin là 1 cột).
-    - Sheet 2: 'DATALOAD TỔNG' và từng sheet theo từng tháng (giữ nguyên chuẩn mẫu DataLoad hạch toán).
+    - primary_sheet='dataload': Sheet DATALOAD TỔNG và các sheet tháng được xếp đầu tiên (Active), sau đó đến sheet THÔNG TIN HÓA ĐƠN.
+    - primary_sheet='detail': Sheet THÔNG TIN HÓA ĐƠN được tạo đầu tiên.
     """
     if isinstance(template_bytes_or_path, str):
         wb_template = openpyxl.load_workbook(template_bytes_or_path)
@@ -871,8 +874,9 @@ def generate_excel_bytes(valid_items, template_bytes_or_path):
     wb_new = openpyxl.Workbook()
     wb_new.remove(wb_new.active)
     
-    # 1. TẠO SHEET MỚI: BẢNG KÊ TOÀN BỘ THÔNG TIN HÓA ĐƠN
-    create_detail_invoice_sheet(wb_new, valid_items)
+    # Nếu ưu tiên sheet chi tiết trước
+    if primary_sheet == 'detail':
+        create_detail_invoice_sheet(wb_new, valid_items, at_front=True)
     
     # 2. TẠO CÁC SHEET DATALOAD
     periods = sorted(list(set(item['period'] for item in valid_items)), reverse=True)
@@ -1071,6 +1075,13 @@ def generate_excel_bytes(valid_items, template_bytes_or_path):
                 for col_i in range(1, 38):
                     ws.cell(r, col_i).fill = yellow_fill
                     
+    # Nếu ưu tiên sheet DataLoad trước, tạo sheet chi tiết sau để DataLoad ở vị trí đầu tiên
+    if primary_sheet == 'dataload':
+        create_detail_invoice_sheet(wb_new, valid_items)
+        
+    # Luôn đặt Sheet 1 (DATALOAD TỔNG) làm sheet hiển thị mặc định khi mở file
+    wb_new.active = 0
+                    
     output_buffer = io.BytesIO()
     wb_new.save(output_buffer)
     output_buffer.seek(0)
@@ -1262,9 +1273,10 @@ if raw_files:
             st.caption("Các cột kỹ thuật cố định: **X = TAB, Z = TAB, AB = TAB, AC = CK, AD = tab, AE = ENT** được giữ nguyên như mẫu. Các cột dữ liệu **W, Y, AA, AG, AH, AI, AJ, AK** được cập nhật chính xác theo hóa đơn add vào.")
             
             periods_list = sorted(list(set(it['period'] for it in valid_items)), reverse=True)
-            col_f1, col_f2 = st.columns([1, 2])
+            
+            col_f1, col_f2, col_f3 = st.columns([1, 1.8, 1.4])
             with col_f1:
-                sel_p = st.selectbox("Chọn kỳ xem:", ["Tất cả các kỳ"] + periods_list, key="dl_view_period")
+                sel_p = st.selectbox("Chọn kỳ xem & xuất:", ["Tất cả các kỳ"] + periods_list, key="dl_view_period")
             with col_f2:
                 view_mode = st.radio("Chế độ hiển thị:", [
                     "🎯 Trọng tâm mẫu mới (Cột W ➔ AK)",
@@ -1278,6 +1290,32 @@ if raw_files:
             taxable_items = [it for it in items_to_show if it['is_taxable']]
             nontaxable_items = [it for it in items_to_show if not it['is_taxable']]
             sorted_items = taxable_items + nontaxable_items
+
+            # Chuẩn bị file Excel DataLoad tải về nhanh
+            tag_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            tmpl_bytes = template_file_bytes or DEFAULT_TEMPLATE_PATH
+            if sel_p == "Tất cả các kỳ":
+                file_dl_cur = f"DataLoad_MTMN_TONG_{tag_time}.xlsx"
+                label_btn_top = "📥 Xuất Excel DataLoad (Tất Cả)"
+                items_dl_export = valid_items
+            else:
+                slug_p = sel_p.replace(' ', '_').replace('/', '_')
+                file_dl_cur = f"DataLoad_MTMN_{slug_p}_{tag_time}.xlsx"
+                label_btn_top = f"📥 Xuất Excel DataLoad ({sel_p})"
+                items_dl_export = items_to_show
+                
+            bytes_dl_cur = generate_excel_bytes(items_dl_export, tmpl_bytes, primary_sheet='dataload')
+
+            with col_f3:
+                st.download_button(
+                    label=label_btn_top,
+                    data=bytes_dl_cur,
+                    file_name=file_dl_cur,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True,
+                    key="btn_dl_top"
+                )
 
             if view_mode == "🎯 Trọng tâm mẫu mới (Cột W ➔ AK)":
                 df_focus = pd.DataFrame([
@@ -1372,6 +1410,39 @@ if raw_files:
                     for idx, it in enumerate(sorted_items, start=1)
                 ])
                 st.dataframe(df_table, use_container_width=True, height=480)
+
+            # Khối xuất file Excel đầy đủ chi tiết bên dưới bảng
+            st.markdown("---")
+            col_exp_info, col_exp_act = st.columns([1.6, 1.4])
+            with col_exp_info:
+                st.markdown("#### 📥 Xuất File Excel Bảng Dữ Liệu DataLoad (Đầy đủ cột A ➔ AK)")
+                st.markdown(f"""
+                * **Định dạng file:** Excel `.xlsx` chuẩn mẫu mới, đầy đủ **37 cột (A ➔ AK)**, mở file ra là thấy ngay sheet DataLoad.
+                * **Cột cố định:** `X, Z, AB, AC, AD, AE` (`TAB`, `CK`, `tab`, `ENT`).
+                * **Cột dữ liệu:** `W (ND)`, `Y (Số tiền trước thuế)`, `AA (Thuế suất)`, `AG (test MST)`, `AH (test VAT)`, `AI (Tên đơn vị nhận)`, `AJ (MST)`, `AK (địa chỉ)`.
+                * **Số lượng hóa đơn:** **{len(items_to_show)} hóa đơn** ({'Tất cả các kỳ' if sel_p == 'Tất cả các kỳ' else f'Kỳ {sel_p}'}). Hóa đơn có thuế xếp trên, không thuế xếp dưới và tô vàng toàn dòng.
+                """)
+            with col_exp_act:
+                st.download_button(
+                    label=f"📥 TẢI XUỐNG FILE EXCEL: {file_dl_cur}",
+                    data=bytes_dl_cur,
+                    file_name=file_dl_cur,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    use_container_width=True,
+                    key="btn_dl_bottom_cur"
+                )
+                if sel_p != "Tất cả các kỳ":
+                    bytes_dl_all = generate_excel_bytes(valid_items, tmpl_bytes, primary_sheet='dataload')
+                    file_dl_all = f"DataLoad_MTMN_TONG_{tag_time}.xlsx"
+                    st.download_button(
+                        label="📥 TẢI XUỐNG TOÀN BỘ CÁC KỲ (TẤT CẢ HÓA ĐƠN)",
+                        data=bytes_dl_all,
+                        file_name=file_dl_all,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key="btn_dl_bottom_all"
+                    )
             
     with tab_by_month:
         if valid_items:
