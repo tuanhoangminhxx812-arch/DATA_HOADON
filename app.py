@@ -883,7 +883,10 @@ def generate_excel_bytes(valid_items, template_bytes_or_path):
         sheets_to_create.append((p, items_p))
         
     yellow_fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
+    green_fill = PatternFill(start_color='92D050', end_color='92D050', fill_type='solid')
     font_tnr = Font(name='Times New Roman', size=10)
+    font_header_bold = Font(name='Times New Roman', size=10, bold=True)
+    align_center = Alignment(horizontal='center', vertical='center')
     
     for sheet_name, raw_items in sheets_to_create:
         ws = wb_new.create_sheet(title=sheet_name)
@@ -902,6 +905,35 @@ def generate_excel_bytes(valid_items, template_bytes_or_path):
                 dest_cell.alignment = copy(src_cell.alignment)
             if src_cell.border:
                 dest_cell.border = copy(src_cell.border)
+
+        # Đảm bảo header và kích thước các cột mới (AF -> AK) luôn chuẩn xác theo mẫu
+        ws.cell(1, 32, value=None).fill = green_fill
+        c_ag = ws.cell(1, 33, value='test MST')
+        c_ag.font = font_header_bold
+        c_ag.alignment = align_center
+
+        c_ah = ws.cell(1, 34, value='test VAT')
+        c_ah.font = font_header_bold
+        c_ah.alignment = align_center
+
+        c_ai = ws.cell(1, 35, value='Tên đơn vị nhận')
+        c_ai.font = font_header_bold
+        c_ai.alignment = align_center
+
+        c_aj = ws.cell(1, 36, value='MST')
+        c_aj.font = font_header_bold
+        c_aj.alignment = align_center
+
+        c_ak = ws.cell(1, 37, value='địa chỉ')
+        c_ak.font = font_header_bold
+        c_ak.alignment = align_center
+
+        ws.column_dimensions['AF'].width = 3.0
+        ws.column_dimensions['AG'].width = 10.0
+        ws.column_dimensions['AH'].width = 11.0
+        ws.column_dimensions['AI'].width = 45.0
+        ws.column_dimensions['AJ'].width = 18.0
+        ws.column_dimensions['AK'].width = 50.0
 
         # Sắp xếp: Có thuế lên trên, Không thuế xuống dưới
         taxable_items = [it for it in raw_items if it['is_taxable']]
@@ -992,7 +1024,7 @@ def generate_excel_bytes(valid_items, template_bytes_or_path):
             # Col W: ND
             ws.cell(r, 23, value=item['nd']).font = font_tnr
             
-            # Col X: TAB
+            # Col X: TAB (cố định theo mẫu)
             ws.cell(r, 24, value='TAB').font = font_tnr
             
             # Col Y: Số tiền trước thuế (định dạng số có dấu phân cách hàng nghìn)
@@ -1000,14 +1032,14 @@ def generate_excel_bytes(valid_items, template_bytes_or_path):
             cY.font = font_tnr
             cY.number_format = '#,##0'
             
-            # Col Z: TAB
+            # Col Z: TAB (cố định theo mẫu)
             ws.cell(r, 26, value='TAB').font = font_tnr
             
             # Col AA: Thuế suất
             cAA = ws.cell(r, 27, value=item['thue_suat'])
             cAA.font = font_tnr
             
-            # Col AB, AC, AD, AE: TAB, CK, tab, ENT
+            # Col AB, AC, AD, AE: TAB, CK, tab, ENT (cố định theo mẫu)
             ws.cell(r, 28, value='TAB').font = font_tnr
             ws.cell(r, 29, value='CK').font = font_tnr
             ws.cell(r, 30, value='tab').font = font_tnr
@@ -1020,11 +1052,23 @@ def generate_excel_bytes(valid_items, template_bytes_or_path):
             # Col AH: test VAT
             ws.cell(r, 34, value=f'=ROUND(D{r}-(Y{r}*(AA{r}/100)),0)').font = font_tnr
 
+            # Col AI: Tên đơn vị nhận
+            cAI = ws.cell(r, 35, value=item.get('buyer_name', ''))
+            cAI.font = font_tnr
+            
+            # Col AJ: MST
+            cAJ = ws.cell(r, 36, value=item.get('buyer_mst', ''))
+            cAJ.font = font_tnr
+            
+            # Col AK: địa chỉ
+            cAK = ws.cell(r, 37, value=item.get('buyer_addr', ''))
+            cAK.font = font_tnr
+
             # XỬ LÝ MÀU THEO YÊU CẦU:
             # 1. Hóa đơn CÓ THUẾ: Bỏ toàn bộ màu vàng ở tất cả các cột để dữ liệu sạch đẹp tự nhiên.
-            # 2. Hóa đơn KHÔNG THUẾ: Tô vàng toàn bộ dòng (A -> AH) để anh dễ dàng nhận biết các hóa đơn không thuế.
+            # 2. Hóa đơn KHÔNG THUẾ: Tô vàng toàn bộ dòng (A -> AK) để anh dễ dàng nhận biết các hóa đơn không thuế.
             if not is_taxable:
-                for col_i in range(1, 35):
+                for col_i in range(1, 38):
                     ws.cell(r, col_i).fill = yellow_fill
                     
     output_buffer = io.BytesIO()
@@ -1214,24 +1258,120 @@ if raw_files:
 
     with tab_view:
         if valid_items:
-            df_table = pd.DataFrame([
-                {
-                    'File': it['filename'],
-                    'Loại': it['format'],
-                    'Kỳ': it['period'],
-                    'Phân loại thuế': '🟢 Có thuế (Xếp trên)' if it['is_taxable'] else '🟡 Không thuế (Tô vàng)',
-                    'Ký hiệu': it['ky_hieu_hd'],
-                    'Số HĐ': it['so_hd'],
-                    'Ngày HĐ': it['ngay_hd'].strftime('%d/%m/%Y') if isinstance(it['ngay_hd'], (datetime.datetime, datetime.date)) else str(it['ngay_hd']),
-                    'Tên người bán': it['ten_kh'],
-                    'MST': it['mst'],
-                    'Tiền trước thuế': f"{it['tien_truoc_thue']:,}".replace(',', ' '),
-                    'Thuế suất': f"{it['thue_suat']}%" if isinstance(it['thue_suat'], int) else it['thue_suat'],
-                    'Tiền thuế': f"{it['tien_thue']:,}".replace(',', ' '),
-                }
-                for it in valid_items
-            ])
-            st.dataframe(df_table, use_container_width=True, height=450)
+            st.markdown("##### ⚡ Bảng Dữ Liệu DataLoad Theo Mẫu Mới (Cột W ➔ AK & Toàn bộ A ➔ AK)")
+            st.caption("Các cột kỹ thuật cố định: **X = TAB, Z = TAB, AB = TAB, AC = CK, AD = tab, AE = ENT** được giữ nguyên như mẫu. Các cột dữ liệu **W, Y, AA, AG, AH, AI, AJ, AK** được cập nhật chính xác theo hóa đơn add vào.")
+            
+            periods_list = sorted(list(set(it['period'] for it in valid_items)), reverse=True)
+            col_f1, col_f2 = st.columns([1, 2])
+            with col_f1:
+                sel_p = st.selectbox("Chọn kỳ xem:", ["Tất cả các kỳ"] + periods_list, key="dl_view_period")
+            with col_f2:
+                view_mode = st.radio("Chế độ hiển thị:", [
+                    "🎯 Trọng tâm mẫu mới (Cột W ➔ AK)",
+                    "📋 Toàn bộ bảng DataLoad (Cột A ➔ AK)",
+                    "⚡ Bảng tóm tắt nhanh"
+                ], horizontal=True, key="dl_view_mode")
+                
+            items_to_show = valid_items if sel_p == "Tất cả các kỳ" else [it for it in valid_items if it['period'] == sel_p]
+            
+            # Sắp xếp chuẩn DataLoad: Có thuế lên trước, Không thuế xuống dưới
+            taxable_items = [it for it in items_to_show if it['is_taxable']]
+            nontaxable_items = [it for it in items_to_show if not it['is_taxable']]
+            sorted_items = taxable_items + nontaxable_items
+
+            if view_mode == "🎯 Trọng tâm mẫu mới (Cột W ➔ AK)":
+                df_focus = pd.DataFrame([
+                    {
+                        'STT': idx,
+                        'Số HĐ': it['so_hd'],
+                        'Kỳ HĐ': it['period'],
+                        'Phân loại': '🟢 Có thuế' if it['is_taxable'] else '🟡 Không thuế',
+                        'W (ND)': it['nd'],
+                        'X': 'TAB',
+                        'Y (số tiền trước thuế)': f"{it['tien_truoc_thue']:,}".replace(',', ' '),
+                        'Z': 'TAB',
+                        'AA (thue suat)': it['thue_suat'],
+                        'AB': 'TAB',
+                        'AC': 'CK',
+                        'AD': 'tab',
+                        'AE': 'ENT',
+                        'AF': '',
+                        'AG (test MST)': len(str(it['mst'])) if it['mst'] else 0,
+                        'AH (test VAT)': round(it['tien_thue'] - (it['tien_truoc_thue'] * (it['thue_suat']/100 if isinstance(it['thue_suat'], (int, float)) else 0))),
+                        'AI (Tên đơn vị nhận)': it.get('buyer_name', ''),
+                        'AJ (MST)': it.get('buyer_mst', ''),
+                        'AK (địa chỉ)': it.get('buyer_addr', ''),
+                    }
+                    for idx, it in enumerate(sorted_items, start=1)
+                ])
+                st.dataframe(df_focus, use_container_width=True, height=480)
+                
+            elif view_mode == "📋 Toàn bộ bảng DataLoad (Cột A ➔ AK)":
+                df_full = pd.DataFrame([
+                    {
+                        'A (STT)': idx,
+                        'B (Mã HT)': '082900.000000.000.13311000000.1182.0000.000.000000.0000.0000',
+                        'C': 'TAB',
+                        'D (Thuế)': f"{it['tien_thue']:,}".replace(',', ' '),
+                        'E': 'TAB',
+                        'F (Nội dung)': it['noi_dung'],
+                        'G': 'TAB',
+                        'H': 'TAB',
+                        'I (Loại kê khai)': 'Kê khai thuế GTGT - Đầu vào',
+                        'J': 'TAB',
+                        'K (Ký hiệu HĐ)': it['ky_hieu_hd'],
+                        'L': 'TAB',
+                        'M (Số HĐ)': it['so_hd'],
+                        'N': 'TAB',
+                        'O (Ngày HĐ)': it['ngay_hd'].strftime('%d/%m/%Y') if isinstance(it['ngay_hd'], (datetime.datetime, datetime.date)) else str(it['ngay_hd']),
+                        'P': 'TAB',
+                        'Q': 1,
+                        'R': 'TAB',
+                        'S (TEN KH)': it['ten_kh'],
+                        'T': 'TAB',
+                        'U (MST)': it['mst'],
+                        'V': 'TAB',
+                        'W (ND)': it['nd'],
+                        'X': 'TAB',
+                        'Y (số tiền trước thuế)': f"{it['tien_truoc_thue']:,}".replace(',', ' '),
+                        'Z': 'TAB',
+                        'AA (thue suat)': it['thue_suat'],
+                        'AB': 'TAB',
+                        'AC': 'CK',
+                        'AD': 'tab',
+                        'AE': 'ENT',
+                        'AF': '',
+                        'AG (test MST)': len(str(it['mst'])) if it['mst'] else 0,
+                        'AH (test VAT)': round(it['tien_thue'] - (it['tien_truoc_thue'] * (it['thue_suat']/100 if isinstance(it['thue_suat'], (int, float)) else 0))),
+                        'AI (Tên đơn vị nhận)': it.get('buyer_name', ''),
+                        'AJ (MST)': it.get('buyer_mst', ''),
+                        'AK (địa chỉ)': it.get('buyer_addr', ''),
+                    }
+                    for idx, it in enumerate(sorted_items, start=1)
+                ])
+                st.dataframe(df_full, use_container_width=True, height=480)
+                
+            else:
+                df_table = pd.DataFrame([
+                    {
+                        'STT': idx,
+                        'File': it['filename'],
+                        'Kỳ': it['period'],
+                        'Phân loại thuế': '🟢 Có thuế' if it['is_taxable'] else '🟡 Không thuế',
+                        'Ký hiệu': it['ky_hieu_hd'],
+                        'Số HĐ': it['so_hd'],
+                        'Ngày HĐ': it['ngay_hd'].strftime('%d/%m/%Y') if isinstance(it['ngay_hd'], (datetime.datetime, datetime.date)) else str(it['ngay_hd']),
+                        'Người bán (CĐT)': it['ten_kh'],
+                        'MST người bán': it['mst'],
+                        'Tiền trước thuế': f"{it['tien_truoc_thue']:,}".replace(',', ' '),
+                        'Thuế suất': f"{it['thue_suat']}%" if isinstance(it['thue_suat'], int) else it['thue_suat'],
+                        'Tiền thuế': f"{it['tien_thue']:,}".replace(',', ' '),
+                        'Đơn vị nhận (Bên mua)': it.get('buyer_name', ''),
+                        'MST đơn vị nhận': it.get('buyer_mst', ''),
+                    }
+                    for idx, it in enumerate(sorted_items, start=1)
+                ])
+                st.dataframe(df_table, use_container_width=True, height=480)
             
     with tab_by_month:
         if valid_items:
@@ -1268,7 +1408,12 @@ if raw_files:
             * **Sheet 1 (MỚI):** `THÔNG TIN HÓA ĐƠN` - Chứa toàn bộ thông tin chi tiết: Đơn vị bán & Khách hàng (Tên, MST, Địa chỉ), Hàng hóa, ĐVT, Số lượng, Đơn giá, Thành tiền, Thuế suất, Tiền thuế, Tổng tiền.
             * **Sheet tổng:** `DATALOAD TỔNG`
             * **Các sheet tháng:** `T08-2026`, `T07-2026`...
-            * **Quy tắc sắp xếp:** Hóa đơn có thuế lên trên $\\rightarrow$ Hóa đơn không thuế xuống dưới (tô vàng toàn dòng).
+            * **Chuẩn mẫu DataLoad mới:**
+              - Các cột cố định kỹ thuật: **X = TAB, Z = TAB, AB = TAB, AC = CK, AD = tab, AE = ENT**
+              - Cột vạch ngăn: **AF (màu xanh)**
+              - Các cột công thức: **AG (test MST = LEN(U)), AH (test VAT)**
+              - Các cột thông tin bên nhận: **AI (Tên đơn vị nhận), AJ (MST), AK (địa chỉ)**
+            * **Quy tắc sắp xếp:** Hóa đơn có thuế lên trên $\\rightarrow$ Hóa đơn không thuế xuống dưới (tô vàng toàn dòng A -> AK).
             * **Định dạng:** Ngày `dd/mm/yyyy`, Tiền số có dấu phân cách `#,#0`.
             """)
             
